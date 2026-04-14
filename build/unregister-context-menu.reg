@@ -1,0 +1,6 @@
+Windows Registry Editor Version 5.00
+
+; PePe Terminal - 탐색기 우클릭 메뉴 제거
+
+[-HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\PepeTerminal]
+[-HKEY_CURRENT_USER\Software\Classes\Directory\shell\PepeTerminal]

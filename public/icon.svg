@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- 배경 -->
+  <rect width="256" height="256" rx="40" fill="#1a1a2e"/>
+  <!-- 페페 얼굴 -->
+  <ellipse cx="128" cy="140" rx="85" ry="78" fill="#6b8e23"/>
+  <!-- 눈 흰자 -->
+  <ellipse cx="98" cy="120" rx="28" ry="30" fill="#fff"/>
+  <ellipse cx="158" cy="120" rx="28" ry="30" fill="#fff"/>
+  <!-- 눈동자 -->
+  <circle cx="105" cy="122" r="14" fill="#222"/>
+  <circle cx="165" cy="122" r="14" fill="#222"/>
+  <!-- 눈 하이라이트 -->
+  <circle cx="110" cy="117" r="5" fill="#fff"/>
+  <circle cx="170" cy="117" r="5" fill="#fff"/>
+  <!-- 입 (미소) -->
+  <path d="M85 165 Q128 195 171 165" stroke="#3d5c0a" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <!-- 볼 -->
+  <ellipse cx="78" cy="155" rx="15" ry="10" fill="rgba(255,100,100,0.2)"/>
+  <ellipse cx="178" cy="155" rx="15" ry="10" fill="rgba(255,100,100,0.2)"/>
+  <!-- 터미널 기호 >_ -->
+  <text x="128" y="230" text-anchor="middle" font-family="Consolas,monospace" font-size="32" font-weight="bold" fill="#2b6b9b">&gt;_</text>
+</svg>

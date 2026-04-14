@@ -1,0 +1,13 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\PepeTerminal]
+@="Open PePe Terminal here"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\PepeTerminal\command]
+@="\"C:\\Program Files\\PePe Terminal(SSH)\\PePe Terminal(SSH).exe\" \"%V\""
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\PepeTerminal]
+@="Open PePe Terminal here"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\PepeTerminal\command]
+@="\"C:\\Program Files\\PePe Terminal(SSH)\\PePe Terminal(SSH).exe\" \"%1\""
