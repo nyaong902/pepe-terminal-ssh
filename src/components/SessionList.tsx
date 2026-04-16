@@ -33,12 +33,13 @@ type Folder = {
 
 type Props = {
   onConnect: (sessionId: string, sessionName: string, targetPanelId?: string | null, sessionTheme?: string, fontFamily?: string, fontSize?: number, scrollback?: number) => void;
+  onMultiConnect?: (sessions: Session[], mode: 'minitab' | 'split-h' | 'split-v') => void;
   onFileTransfer?: (sessionId: string, sessionName: string) => void;
   onDisconnect?: (targetPanelId?: string | null) => void;
   targetPanelId?: string | null;
 };
 
-export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTransfer, targetPanelId }) => {
+export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisconnect, onFileTransfer, targetPanelId }) => {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [width, setWidth] = useState<number>(() => {
@@ -502,9 +503,52 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
       {contextMenu && (
         <div
           className="context-menu"
+          ref={el => {
+            if (el) {
+              const rect = el.getBoundingClientRect();
+              const maxTop = window.innerHeight - rect.height - 8;
+              if (rect.top > maxTop) el.style.top = `${Math.max(8, maxTop)}px`;
+            }
+          }}
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onClick={e => e.stopPropagation()}
         >
+          {selectedIds.size > 1 && selectedIds.has(contextMenu.id) ? (
+            <>
+              {(() => {
+                const selectedSessions = sessions.filter(s => selectedIds.has(s.id));
+                if (selectedSessions.length === 0) return null;
+                return (
+                  <>
+                    <div className="context-menu-label">{selectedSessions.length}개 세션 선택됨</div>
+                    <div className="context-menu-item" onClick={() => {
+                      onMultiConnect?.(selectedSessions, 'minitab');
+                      setContextMenu(null); setSelectedIds(new Set());
+                    }}>
+                      📑 미니탭으로 연결
+                    </div>
+                    <div className="context-menu-item" onClick={() => {
+                      onMultiConnect?.(selectedSessions, 'split-v');
+                      setContextMenu(null); setSelectedIds(new Set());
+                    }}>
+                      ▐ 세로 분할로 연결
+                    </div>
+                    <div className="context-menu-item" onClick={() => {
+                      onMultiConnect?.(selectedSessions, 'split-h');
+                      setContextMenu(null); setSelectedIds(new Set());
+                    }}>
+                      ▄ 가로 분할로 연결
+                    </div>
+                    <div className="context-menu-separator" />
+                  </>
+                );
+              })()}
+              <div className="context-menu-item" onClick={() => { setContextMenu(null); handleDelete(); }}>
+                🗑 선택 항목 삭제
+              </div>
+            </>
+          ) : (
+          <>
           <div className="context-menu-item" onClick={() => { startRename(contextMenu.id, contextMenu.type, contextMenu.name); setContextMenu(null); }}>
             이름 변경
           </div>
@@ -567,6 +611,8 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
                 📂 폴더로 이동...
               </div>
             </>
+          )}
+          </>
           )}
         </div>
       )}

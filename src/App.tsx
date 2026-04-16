@@ -1052,6 +1052,50 @@ function App() {
     <div className={`app-root${showBroadcast ? ' has-broadcast' : ''}${showQuickConnect ? ' has-quickconnect' : ''}${fullscreenTermId ? ' term-fullscreen' : ''}`} data-fs-term={fullscreenTermId || ''}>
       <SessionList
         onConnect={(sid, name, panelId, sessTheme, ff, fs, sb) => handleConnectSession(sid, name, panelId, sessTheme, ff, fs, sb)}
+        onMultiConnect={(sessList, mode) => {
+          if (!activeTab || !selectedPanelId || sessList.length === 0) return;
+          if (mode === 'minitab') {
+            for (const s of sessList) handleConnectSession(s.id, s.name, selectedPanelId, s.theme, s.fontFamily, s.fontSize, s.scrollback);
+          } else {
+            const dir: 'row' | 'column' = mode === 'split-v' ? 'row' : 'column';
+            // 모든 세션의 termId를 미리 생성
+            const newTermIds = sessList.map(() => `term-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+            // 첫 번째는 현재 패널에 세션 추가, 나머지는 분할 패널 생성 — 한 번의 layout 업데이트로 처리
+            updateLayout(activeTab.id, layout => {
+              // 첫 번째 세션을 현재 패널에 추가
+              const result = addSessionToPanel(layout, selectedPanelId, sessList[0].id, sessList[0].name);
+              // 첫 번째 세션의 termId를 교체
+              const replaceTermId = (node: LayoutNode): LayoutNode => {
+                if (node.type === 'leaf') {
+                  const sessions = node.panel.sessions.map(s => s.termId === result.termId ? { ...s, termId: newTermIds[0] } : s);
+                  return { ...node, panel: { ...node.panel, sessions } };
+                }
+                return { ...node, children: node.children.map(replaceTermId) };
+              };
+              let currentLayout = replaceTermId(result.layout);
+              // 나머지 세션은 분할로 추가
+              let lastPanelId = selectedPanelId;
+              for (let i = 1; i < sessList.length; i++) {
+                const newSess: PanelSession = { termId: newTermIds[i], sessionId: sessList[i].id, sessionName: sessList[i].name };
+                currentLayout = splitNodeWithSessions(currentLayout, lastPanelId, dir, [newSess], false);
+              }
+              return currentLayout;
+            });
+            // 모든 세션 연결
+            for (let i = 0; i < sessList.length; i++) {
+              const s = sessList[i];
+              const tid = newTermIds[i];
+              setTimeout(async () => {
+                try {
+                  const r = await (window as any).api.connectSSH(tid, s.id);
+                  if (r === 'need-password') promptPasswordAndConnect(tid, s.id);
+                } catch {}
+                registerTermSession(tid, s.id, s.name, '');
+                if (i === sessList.length - 1) setTimeout(() => refitAllTerms(), 100);
+              }, 100 + 50 * i);
+            }
+          }
+        }}
         onDisconnect={panelId => handleDisconnectSession(panelId)}
         targetPanelId={selectedPanelId}
         onFileTransfer={async (sessionId, sessionName) => {

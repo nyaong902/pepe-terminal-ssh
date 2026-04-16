@@ -953,6 +953,13 @@ html, body {
   background: #2b6b9b;
   color: #fff;
 }
+.context-menu-label {
+  padding: 4px 14px 2px;
+  color: #777;
+  font-size: 11px;
+  font-weight: 600;
+  user-select: none;
+}
 .context-menu-separator {
   height: 1px;
   background: #333;
@@ -1277,18 +1284,42 @@ html, body {
 }
 
 /* ── Panel mini session tabs ── */
+.panel-session-tabs-wrapper {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 0;
+}
+.panel-tabs-scroll-btn {
+  background: #222;
+  border: 1px solid #333;
+  color: #999;
+  font-size: 13px;
+  width: 18px;
+  height: 20px;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  line-height: 1;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.panel-tabs-scroll-btn:hover {
+  background: #333;
+  color: #eee;
+}
 .panel-session-tabs {
   display: flex;
   gap: 2px;
   flex: 1;
   min-width: 0;
-  overflow-x: auto;
+  overflow-x: hidden;
   overflow-y: hidden;
   align-items: center;
-}
-
-.panel-session-tabs::-webkit-scrollbar {
-  height: 0;
+  scroll-behavior: smooth;
 }
 
 .panel-session-tab {
@@ -1304,6 +1335,7 @@ html, body {
   white-space: nowrap;
   transition: all 0.12s;
   border: 1px solid transparent;
+  flex-shrink: 0;
 }
 
 .panel-session-tab:hover {

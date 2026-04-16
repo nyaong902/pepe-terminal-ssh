@@ -1286,7 +1286,10 @@ export const TerminalPanel: React.FC<Props> = ({
         }}
       >
         {panel.sessions.length > 0 ? (
-          <div className="panel-session-tabs">
+          <div className="panel-session-tabs-wrapper">
+            <div className="panel-session-tabs" data-panel-tabs={nodeId} onWheel={e => {
+              e.currentTarget.scrollLeft += e.deltaY > 0 ? 60 : -60;
+            }}>
             {panel.sessions.map((sess, idx) => (
               <span
                 key={sess.termId}
@@ -1346,6 +1349,15 @@ export const TerminalPanel: React.FC<Props> = ({
             {availableShells && availableShells.length > 0 && (
               <span className="panel-session-tab-add panel-shell-btn" onClick={e => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); setShellMenu(prev => prev ? null : { x: r.left, y: r.bottom }); }} title="쉘 선택">∨</span>
             )}
+          </div>
+            <button className="panel-tabs-scroll-btn" onClick={() => {
+              const el = document.querySelector(`[data-panel-tabs="${nodeId}"]`);
+              if (el) el.scrollBy({ left: -100, behavior: 'smooth' });
+            }}>‹</button>
+            <button className="panel-tabs-scroll-btn" onClick={() => {
+              const el = document.querySelector(`[data-panel-tabs="${nodeId}"]`);
+              if (el) el.scrollBy({ left: 100, behavior: 'smooth' });
+            }}>›</button>
           </div>
         ) : (
           <span className="panel-header-label" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
