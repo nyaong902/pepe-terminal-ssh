@@ -120,6 +120,7 @@ function App() {
   const [broadcastScope, setBroadcastScope] = useState<'current' | 'visible' | 'connected'>('current');
   const [broadcastShowHistory, setBroadcastShowHistory] = useState(false);
   const [broadcastHistoryIdx, setBroadcastHistoryIdx] = useState(-1);
+  const [splitSessionPicker, setSplitSessionPicker] = useState<{ dir: 'row' | 'column'; sessions: { sessionId: string; sessionName: string; host: string; termId: string }[]; srcTermId?: string } | null>(null);
   const [, setConnectedTick] = useState(0);
   // 글로벌 연결 상태 변경시 일괄전송 카운트 등 재계산을 위해 강제 리렌더
   useEffect(() => subscribeConnectedChange(() => setConnectedTick(n => n + 1)), []);
@@ -274,6 +275,30 @@ function App() {
         }
         return;
       }
+      // Alt+Shift+H: 연결된 세션 선택 + 가로 분할
+      // Alt+Shift+V: 연결된 세션 선택 + 세로 분할
+      if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.code === 'KeyH' || e.code === 'KeyV') && activeTab && selectedPanelId) {
+        e.preventDefault();
+        const dir: 'row' | 'column' = e.code === 'KeyV' ? 'row' : 'column';
+        const curTid = getActiveTermId();
+        const connectedSessions: { sessionId: string; sessionName: string; host: string; termId: string }[] = [];
+        const collectLeaves = (node: LayoutNode) => {
+          if (node.type === 'leaf') {
+            for (const s of node.panel.sessions) {
+              if (isTermConnected(s.termId)) {
+                const info = getTermSessionInfo(s.termId);
+                if (info && info.sessionId && !connectedSessions.some(c => c.sessionId === info.sessionId)) {
+                  connectedSessions.push({ sessionId: info.sessionId, sessionName: info.sessionName, host: info.host, termId: s.termId });
+                }
+              }
+            }
+          } else { for (const c of node.children) collectLeaves(c); }
+        };
+        collectLeaves(activeTab.layout);
+        if (connectedSessions.length === 0) { splitPanel(activeTab.id, selectedPanelId, dir); return; }
+        setSplitSessionPicker({ dir, sessions: connectedSessions, srcTermId: curTid || undefined });
+        return;
+      }
       // Alt+1..9: 워크스페이스 내 모든 미니탭(모든 패널) 기준 N번째 탭으로 이동 (Alt+9는 마지막 탭)
       if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
         const m = /^Digit([1-9])$/.exec(e.code);
@@ -355,6 +380,31 @@ function App() {
         return;
       }
       if (!e.shiftKey) return;
+      // Ctrl+Shift+H: 현재 세션 복제 + 가로 분할
+      // Ctrl+Shift+V: 현재 세션 복제 + 세로 분할
+      if ((code === 'KeyH' || code === 'KeyV') && !e.altKey && activeTab && selectedPanelId) {
+        e.preventDefault();
+        const dir: 'row' | 'column' = code === 'KeyV' ? 'row' : 'column';
+        const tid = getActiveTermId();
+        const sessInfo = tid ? getTermSessionInfo(tid) : null;
+        if (sessInfo && sessInfo.sessionId) {
+          const newTermId = `term-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const newSess: PanelSession = { termId: newTermId, sessionId: sessInfo.sessionId, sessionName: sessInfo.sessionName || 'Session' };
+          updateLayout(activeTab.id, layout => splitNodeWithSessions(layout, selectedPanelId, dir, [newSess], false));
+          setTimeout(async () => {
+            if (tid) cloneTermStyle(tid, newTermId);
+            try {
+              const r = await (window as any).api.connectSSH(newTermId, sessInfo.sessionId);
+              if (r === 'need-password') promptPasswordAndConnect(newTermId, sessInfo.sessionId);
+            } catch {}
+            registerTermSession(newTermId, sessInfo.sessionId, sessInfo.sessionName, sessInfo.host);
+            setTimeout(() => { refitAllTerms(); focusTerm(newTermId); }, 100);
+          }, 100);
+        } else {
+          splitPanel(activeTab.id, selectedPanelId, dir);
+        }
+        return;
+      }
       if (code === 'KeyF') { e.preventDefault(); setShowSearch(prev => !prev); return; }
       const termId = getActiveTermId();
       if (!termId) return;
@@ -409,6 +459,25 @@ function App() {
   const splitPanel = (tabId: TabId, targetNodeId: string, direction: 'row' | 'column') => {
     updateLayout(tabId, layout => splitNode(layout, targetNodeId, direction));
     setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
+  };
+
+  const handleSplitSessionSelect = (target: { sessionId: string; sessionName: string; host: string; termId: string }) => {
+    if (!activeTab || !selectedPanelId || !splitSessionPicker) return;
+    const { dir } = splitSessionPicker;
+    const newTermId = `term-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const newSess: PanelSession = { termId: newTermId, sessionId: target.sessionId, sessionName: target.sessionName };
+    updateLayout(activeTab.id, layout => splitNodeWithSessions(layout, selectedPanelId, dir, [newSess], false));
+    setTimeout(async () => {
+      // 선택된 세션의 원본 termId에서 스타일 복제
+      cloneTermStyle(target.termId, newTermId);
+      try {
+        const r = await (window as any).api.connectSSH(newTermId, target.sessionId);
+        if (r === 'need-password') promptPasswordAndConnect(newTermId, target.sessionId);
+      } catch {}
+      registerTermSession(newTermId, target.sessionId, target.sessionName, target.host);
+      setTimeout(() => { refitAllTerms(); focusTerm(newTermId); }, 100);
+    }, 100);
+    setSplitSessionPicker(null);
   };
 
   const closePanel = (tabId: TabId, targetNodeId: string) => {
@@ -1365,6 +1434,23 @@ function App() {
           <span className="sftp-progress-pct">
             {sftpProgress.total > 0 ? Math.round(sftpProgress.transferred / sftpProgress.total * 100) : 0}%
           </span>
+        </div>
+      )}
+      {splitSessionPicker && (
+        <div className="folder-picker-backdrop" onClick={() => setSplitSessionPicker(null)}>
+          <div className="folder-picker" onClick={e => e.stopPropagation()}>
+            <div className="folder-picker-title">세션 선택 ({splitSessionPicker.dir === 'row' ? '세로 분할' : '가로 분할'})</div>
+            <div className="folder-picker-list">
+              {splitSessionPicker.sessions.map(s => (
+                <div key={s.sessionId} className="folder-picker-item" onClick={() => handleSplitSessionSelect(s)}>
+                  📡 {s.sessionName} <span style={{ color: '#777', fontSize: 11 }}>({s.host})</span>
+                </div>
+              ))}
+            </div>
+            <div className="folder-picker-actions">
+              <button onClick={() => setSplitSessionPicker(null)}>취소</button>
+            </div>
+          </div>
         </div>
       )}
     </div>
