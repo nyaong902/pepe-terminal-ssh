@@ -61,7 +61,10 @@
         "nsis",
         "portable"
       ],
-      "icon": "public/icon.ico"
+      "icon": "public/icon.ico",
+      "signingHashAlgorithms": ["sha256"],
+      "certificateFile": "cert/PePeTerminal_v2.pfx",
+      "certificatePassword": "pepe1234"
     },
     "nsis": {
       "oneClick": false,

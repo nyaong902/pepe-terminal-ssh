@@ -1436,12 +1436,14 @@ html, body {
 
 .session-editor {
   width: 520px;
+  max-width: calc(100vw - 40px);
   background: #111;
   color: #eee;
   padding: 20px;
   border-radius: 8px;
   border: 1px solid #333;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  box-sizing: border-box;
 }
 
 .session-editor h3 {
@@ -1475,6 +1477,9 @@ html, body {
   font-size: 13px;
   outline: none;
   transition: border-color 0.15s;
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
 }
 
 .session-editor-grid input:focus,
