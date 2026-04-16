@@ -472,6 +472,22 @@ html, body {
   background: #0d0f10;
 }
 
+/* Alt+Enter 전체화면 모드: 탭바/브로드캐스트 바 숨김 (타이틀바/사이드바/미니탭바는 유지) */
+.app-root.term-fullscreen .tab-bar,
+.app-root.term-fullscreen .broadcast-bar,
+.app-root.term-fullscreen .quick-connect-bar {
+  display: none !important;
+}
+/* 전체화면 모드에서 비활성 패널 숨김 — 활성 패널만 꽉 채움 */
+.app-root.term-fullscreen .layout-leaf-inner:not(.selected) {
+  display: none !important;
+}
+.app-root.term-fullscreen .layout-root > *,
+.app-root.term-fullscreen .layout-row,
+.app-root.term-fullscreen .layout-column {
+  flex: 1 !important;
+}
+
 /* 텍스트 일괄 전송 입력바가 표시될 때 하단 고정 컨텐츠에 여유 공간 확보 */
 .app-root.has-broadcast .session-sidebar-inner {
   padding-bottom: 64px;
@@ -673,6 +689,13 @@ html, body {
   top: 40px;
   left: 22px;
   bottom: 24px;
+  padding-top: 8px;
+}
+.app-root.has-quickconnect .session-sidebar-inner.auto-hide {
+  top: 68px;
+}
+.app-root.has-broadcast .session-sidebar-inner.auto-hide {
+  bottom: 60px;
   width: 260px;
   min-width: 0;
   z-index: 1400;
@@ -783,6 +806,7 @@ html, body {
   overflow: auto;
   flex: 1 1 auto;
   outline: none;
+  padding-bottom: 60px;
 }
 
 .session-item {
@@ -971,7 +995,8 @@ html, body {
 
 .session-footer {
   border-top: 1px solid #333;
-  padding: 6px 0 4px;
+  padding: 10px 6px 6px;
+  margin-top: 8px;
   flex-shrink: 0;
 }
 

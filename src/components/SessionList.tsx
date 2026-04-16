@@ -387,6 +387,11 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
                 if (s) startRename(s.id, 'session', s.name);
               }
             }
+            // Delete: 선택 항목 삭제
+            if (e.key === 'Delete' && selectedId) {
+              e.preventDefault();
+              handleDelete();
+            }
             // Ctrl+C: 세션 복사
             if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selectedId && selectedType === 'session') {
               e.preventDefault();

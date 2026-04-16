@@ -119,6 +119,8 @@ function getOrCreateTerm(termId: string): { term: Terminal; fit: FitAddon; searc
       if (e.type !== 'keydown') return true;
       // Alt+1..9: 미니탭 전환 (앱 전역 핸들러로 위임)
       if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && /^Digit[1-9]$/.test(e.code)) return false;
+      // Alt+Enter: 전체화면 토글 (앱 전역 핸들러)
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.code === 'Enter' || e.code === 'NumpadEnter')) return false;
       if (!(e.ctrlKey || e.metaKey)) return true;
       // Ctrl+Tab / Ctrl+Shift+Tab: 미니탭 전환 (앱 전역 핸들러로 위임)
       if (e.code === 'Tab') return false;
@@ -579,6 +581,42 @@ export function clearAllInTerm(termId: string) {
   } catch {}
 }
 
+// 활성 비밀번호 프롬프트 추적 (중복 방지)
+const activePasswordPrompt: Map<string, { dispose: () => void }> = new Map();
+
+/** 비밀번호 미저장 세션: 터미널에서 비밀번호 입력 후 연결 */
+export function promptPasswordAndConnect(termId: string, sessionId: string, cols?: number, rows?: number) {
+  // 이미 프롬프트가 활성화 중이면 스킵
+  if (activePasswordPrompt.has(termId)) return;
+
+  const rec = termStore.get(termId);
+  if (!rec) return;
+  const { term } = rec;
+  const c = cols ?? (term as any).cols ?? 80;
+  const r = rows ?? (term as any).rows ?? 24;
+  term.write('\x1b[93mPassword: \x1b[0m');
+  let pwBuf = '';
+  const cleanup = () => { disposable.dispose(); activePasswordPrompt.delete(termId); };
+  const disposable = term.onData((data: string) => {
+    if (data === '\r' || data === '\n') {
+      cleanup();
+      term.write('\r\n');
+      termPasswordCache.set(termId, pwBuf);
+      sshConnecting.add(termId);
+      window.api?.connectSSHWithPassword?.(termId, sessionId, pwBuf, c, r);
+    } else if (data === '\x7f' || data === '\b') {
+      if (pwBuf.length > 0) { pwBuf = pwBuf.slice(0, -1); term.write('\b \b'); }
+    } else if (data === '\x03') {
+      cleanup();
+      term.write('\r\n\x1b[90m취소\x1b[0m\r\n');
+    } else {
+      pwBuf += data;
+      term.write('*');
+    }
+  });
+  activePasswordPrompt.set(termId, { dispose: () => disposable.dispose() });
+}
+
 /** termId별로 SSH 리스너를 한 번만 설정 (컴포넌트 lifecycle 밖) */
 function ensureSSHSetup(termId: string) {
   if (sshInitialized.has(termId)) return;
@@ -616,6 +654,7 @@ function ensureSSHSetup(termId: string) {
 
   window.api?.onSSHClosed?.((p: any) => {
     if (p.panelId !== termId) return;
+    console.log('[onSSHClosed]', termId, { globalConnected: globalConnected.has(termId), sshConnecting: sshConnecting.has(termId), reconnectUserCancelled: reconnectUserCancelled.has(termId) });
     // 이미 종료 처리 완료된 경우 (연결 상태 아닌데 close 중복) 무시
     if (!globalConnected.has(termId) && !sshConnecting.has(termId)) return;
     globalConnected.delete(termId);
@@ -626,6 +665,44 @@ function ensureSSHSetup(termId: string) {
     if (termSessionMap.has(termId)) {
       startReconnectCountdown(termId);
     }
+  });
+
+  // SSH 에러를 터미널에 표시
+  window.api?.onSSHError?.((p: any) => {
+    if (p.panelId !== termId) return;
+    console.log('[onSSHError]', termId, p.error);
+    sshConnecting.delete(termId);
+    globalConnected.delete(termId);
+    notifyConnectedChange();
+    try { term.write(`\r\n\x1b[91mSSH 오류: ${p.error || 'Unknown error'}\x1b[0m\r\n`); } catch {}
+  });
+
+  // 비밀번호 미저장 세션: keyboard-interactive 인증 프롬프트
+  window.api?.onSSHAuthPrompt?.((p: any) => {
+    if (p.panelId !== termId) return;
+    const promptText = p.prompts?.[0] || 'Password:';
+    // prompt() 대신 터미널에 비밀번호 입력 UI
+    try {
+      term.write(`\r\n\x1b[93m${promptText}\x1b[0m `);
+    } catch {}
+    let pwBuf = '';
+    const disposable = term.onData((data: string) => {
+      if (data === '\r' || data === '\n') {
+        disposable.dispose();
+        term.write('\r\n');
+        window.api?.sshAuthResponse?.(termId, [pwBuf]);
+      } else if (data === '\x7f' || data === '\b') {
+        if (pwBuf.length > 0) { pwBuf = pwBuf.slice(0, -1); term.write('\b \b'); }
+      } else if (data === '\x03') {
+        // Ctrl+C → 취소
+        disposable.dispose();
+        term.write('\r\n\x1b[90m인증 취소\x1b[0m\r\n');
+        window.api?.disconnectSSH?.(termId);
+      } else {
+        pwBuf += data;
+        term.write('*');
+      }
+    });
   });
 }
 
@@ -651,6 +728,18 @@ function ensurePtySetup(termId: string) {
   });
 }
 
+export function pasteToTerm(termId: string, text: string) {
+  try {
+    const entry = termStore.get(termId);
+    if (entry) { entry.term.paste(text); return; }
+  } catch {}
+  // fallback
+  try {
+    if (ptyConnected.has(termId)) (window as any).api?.ptyInput?.(termId, text);
+    else (window as any).api?.sendSSHInput?.(termId, text);
+  } catch {}
+}
+
 export function isTermPty(termId: string): boolean {
   return ptyConnected.has(termId);
 }
@@ -663,6 +752,8 @@ const reconnectUserCancelled = new Set<string>();
 const reconnectState: Map<string, { timer: ReturnType<typeof setInterval> | null; fireTimer?: ReturnType<typeof setTimeout> | null; cancelled: boolean; disp?: any }> = new Map();
 // termId → 세션 정보 매핑 (재연결 + 표시용)
 const termSessionMap: Map<string, { sessionId: string; sessionName: string; host: string; quickSession?: any }> = new Map();
+// termId → 마지막 사용 비밀번호 (메모리 only, 재연결용)
+const termPasswordCache: Map<string, string> = new Map();
 
 export function getTermSessionInfo(termId: string) {
   return termSessionMap.get(termId);
@@ -713,7 +804,7 @@ function startReconnectCountdown(termId: string) {
     }
   }, 250);
 
-  state.fireTimer = setTimeout(() => {
+  state.fireTimer = setTimeout(async () => {
     // 발사 시점에 취소되었거나 이미 다시 연결된 경우 실행하지 않음
     if (state.cancelled) return;
     const cur = reconnectState.get(termId);
@@ -729,7 +820,20 @@ function startReconnectCountdown(termId: string) {
       if (!sessionId && sessInfo.quickSession) {
         (window as any).api.quickConnectSSH(termId, sessInfo.quickSession);
       } else {
-        (window as any).api.connectSSH(termId, sessionId);
+        const r = await (window as any).api.connectSSH(termId, sessionId);
+        if (r === 'need-password') {
+          sshConnecting.delete(termId);
+          const cachedPw = termPasswordCache.get(termId);
+          const cols = (term as any).cols || 80;
+          const rows = (term as any).rows || 24;
+          if (cachedPw) {
+            sshConnecting.add(termId);
+            (window as any).api.connectSSHWithPassword(termId, sessionId, cachedPw, cols, rows);
+          } else {
+            promptPasswordAndConnect(termId, sessionId, cols, rows);
+          }
+          return;
+        }
       }
     } catch {}
   }, TOTAL_MS);
@@ -901,6 +1005,16 @@ export const TerminalPanel: React.FC<Props> = ({
       const rows = (term as any).rows || 24;
       try { term.focus(); } catch {}
 
+      console.log('[initConnect]', activeTermId, {
+        hasSession: !!activeSession,
+        sessionId: activeSession?.sessionId,
+        sshConnecting: sshConnecting.has(activeTermId),
+        globalConnected: globalConnected.has(activeTermId),
+        reconnectState: reconnectState.has(activeTermId),
+        reconnectUserCancelled: reconnectUserCancelled.has(activeTermId),
+        ptyConnected: ptyConnected.has(activeTermId),
+        cachedPw: termPasswordCache.has(activeTermId),
+      });
       if (activeSession && activeSession.sessionId && !sshConnecting.has(activeTermId) && !globalConnected.has(activeTermId) && !reconnectState.has(activeTermId) && !reconnectUserCancelled.has(activeTermId)) {
         // 같은 termId에 PTY가 실행 중이면 종료 (Local Shell → SSH 전환)
         if (ptyConnected.has(activeTermId)) {
@@ -910,7 +1024,21 @@ export const TerminalPanel: React.FC<Props> = ({
           term.clear();
         }
         sshConnecting.add(activeTermId);
-        try { await window.api?.connectSSH?.(activeTermId, activeSession.sessionId, cols, rows); } catch {}
+        try {
+          const result = await window.api?.connectSSH?.(activeTermId, activeSession.sessionId, cols, rows);
+          console.log('[initConnect] connectSSH result:', result);
+          if (result === 'need-password') {
+            sshConnecting.delete(activeTermId);
+            const cachedPw = termPasswordCache.get(activeTermId);
+            console.log('[initConnect] need-password, cachedPw:', !!cachedPw);
+            if (cachedPw) {
+              sshConnecting.add(activeTermId);
+              window.api?.connectSSHWithPassword?.(activeTermId, activeSession.sessionId, cachedPw, cols, rows);
+            } else {
+              promptPasswordAndConnect(activeTermId, activeSession.sessionId, cols, rows);
+            }
+          }
+        } catch (err) { console.error('[initConnect] error:', err); }
         setTimeout(() => { try { window.api?.resizeSSH?.(activeTermId, cols, rows); } catch {} }, 200);
       } else if (globalConnected.has(activeTermId)) {
         try { window.api?.resizeSSH?.(activeTermId, cols, rows); } catch {}
@@ -1165,6 +1293,7 @@ export const TerminalPanel: React.FC<Props> = ({
                   setDropZone(null);
                 }}
                 onClick={e => { e.stopPropagation(); onSwitchSession?.(nodeId, idx); }}
+                onDoubleClick={e => { e.stopPropagation(); onDuplicateSession?.(nodeId, sess.termId); }}
                 onAuxClick={e => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); window.api?.disconnectSSH?.(sess.termId); onCloseSession?.(nodeId, sess.termId); } }}
                 onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setMiniCtx({ x: e.clientX, y: e.clientY, termId: sess.termId, name: sess.sessionName }); }}
               >
@@ -1256,6 +1385,32 @@ export const TerminalPanel: React.FC<Props> = ({
           items={[
             { label: '이름 변경', onClick: () => { setRenamingTermId(miniCtx.termId); setRenameValue(miniCtx.name); } },
             { label: '세션 복제', onClick: () => { onDuplicateSession?.(nodeId, miniCtx.termId); } },
+            { label: '세션 재연결', onClick: async () => {
+              const tid = miniCtx.termId;
+              const info = termSessionMap.get(tid);
+              if (!info) return;
+              try {
+                // 재연결 상태 초기화 + 기존 연결 종료
+                reconnectUserCancelled.delete(tid);
+                if (globalConnected.has(tid) || sshConnecting.has(tid)) {
+                  window.api?.disconnectSSH?.(tid);
+                  await new Promise(res => setTimeout(res, 300));
+                }
+                sshConnecting.delete(tid);
+                globalConnected.delete(tid);
+                // reset-state IPC로 main.ts 상태도 초기화
+                try { await (window as any).api?.resetSSHState?.(tid); } catch {}
+                sshConnecting.add(tid);
+                const entry = termStore.get(tid);
+                const cols = entry ? (entry.term as any).cols : 80;
+                const rows = entry ? (entry.term as any).rows : 24;
+                if (info.sessionId) {
+                  await window.api?.connectSSH?.(tid, info.sessionId, cols, rows);
+                } else if (info.quickSession) {
+                  await (window as any).api?.quickConnectSSH?.(tid, info.quickSession, cols, rows);
+                }
+              } catch {}
+            }},
             { label: '닫기', onClick: () => { window.api?.disconnectSSH?.(miniCtx.termId); onCloseSession?.(nodeId, miniCtx.termId); } },
           ]}
         />
@@ -1277,7 +1432,17 @@ export const TerminalPanel: React.FC<Props> = ({
             <div className="session-editor-actions">
               <button className="btn-cancel" onClick={() => setMultiPaste(null)}>취소</button>
               <button className="btn-save" onClick={() => {
-                try { (window as any).api.sendSSHInput(multiPaste.termId, multiPaste.text); } catch {}
+                try {
+                  const entry = termStore.get(multiPaste.termId);
+                  if (entry) {
+                    // xterm.paste() — bracketed paste mode 활성 시 자동으로 \e[200~...\e[201~ 래핑
+                    entry.term.paste(multiPaste.text);
+                  } else if (ptyConnected.has(multiPaste.termId)) {
+                    (window as any).api.ptyInput(multiPaste.termId, multiPaste.text);
+                  } else {
+                    (window as any).api.sendSSHInput(multiPaste.termId, multiPaste.text);
+                  }
+                } catch {}
                 setMultiPaste(null);
               }}>붙여넣기</button>
             </div>
@@ -1307,7 +1472,10 @@ export const TerminalPanel: React.FC<Props> = ({
                 if (text.includes('\n') && settings.multiLinePaste === 'dialog') {
                   showMultiLinePasteDialog(activeTermId, text);
                 } else {
-                  try { (window as any).api.sendSSHInput(activeTermId, text); } catch {}
+                  try {
+                    const entry = termStore.get(activeTermId);
+                    if (entry) entry.term.paste(text);
+                  } catch {}
                 }
               }).catch(() => {});
             }},

@@ -9,7 +9,7 @@ import { SearchBar } from './components/SearchBar';
 import { FileExplorer } from './components/FileExplorer';
 import { QuickConnectBar, QuickConnectResult } from './components/QuickConnectDialog';
 import { StatusBar } from './components/StatusBar';
-import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, subscribeConnectedChange, focusTerm } from './components/TerminalPanel';
+import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect } from './components/TerminalPanel';
 import { getTerminalSettings, saveTerminalSettings, TerminalSettings } from './utils/terminalSettings';
 import { getThemeList } from './utils/terminalThemes';
 import { SessionList } from './components/SessionList';
@@ -116,11 +116,26 @@ function App() {
     const off = (window as any).api?.onWindowMaximized?.((m: boolean) => setIsMaximized(!!m));
     return () => { try { off?.(); } catch {} };
   }, []);
+  const [fullscreenTermId, setFullscreenTermId] = useState<string | null>(null);
+  const fsWasMaxRef = useRef(false);
   const [showQuickConnect, setShowQuickConnect] = useState(() => {
     const v = localStorage.getItem('showQuickConnect');
     return v === null ? true : v === '1';
   });
   useEffect(() => { localStorage.setItem('showQuickConnect', showQuickConnect ? '1' : '0'); }, [showQuickConnect]);
+
+  // 인라인 토스트 알림 (alert 대체)
+  const showToast = useCallback((msg: string, duration = 3000) => {
+    const el = document.createElement('div');
+    el.textContent = msg;
+    Object.assign(el.style, {
+      position: 'fixed', bottom: '60px', left: '50%', transform: 'translateX(-50%)',
+      background: '#1a1a2e', color: '#eee', padding: '8px 18px', borderRadius: '6px',
+      fontSize: '13px', zIndex: '9999', border: '1px solid #444', whiteSpace: 'nowrap',
+    });
+    document.body.appendChild(el);
+    setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; setTimeout(() => el.remove(), 300); }, duration);
+  }, []);
 
   // 텍스트 일괄 전송 대상 termId 수집
   const collectBroadcastTargets = (scope: 'current' | 'visible' | 'connected'): string[] => {
@@ -174,7 +189,13 @@ function App() {
       return;
     }
     for (const tid of targets) {
-      try { (window as any).api?.sendSSHInput?.(tid, text); } catch {}
+      try {
+        if (isTermPty(tid)) {
+          (window as any).api?.ptyInput?.(tid, text);
+        } else {
+          (window as any).api?.sendSSHInput?.(tid, text);
+        }
+      } catch {}
     }
     flashBroadcastNotice(`${label} → ${targets.length}개 세션 전송`, 'ok');
   };
@@ -205,6 +226,32 @@ function App() {
   // 글로벌 단축키
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Alt+Enter: 현재 미니탭 전체화면 토글 (창도 최대화, 해제 시 원래 상태로)
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.code === 'Enter' || e.code === 'NumpadEnter')) {
+        e.preventDefault();
+        const tid = getActiveTermId();
+        if (tid) {
+          setFullscreenTermId(prev => {
+            const toFullscreen = prev !== tid;
+            (async () => {
+              try {
+                const isMax = await (window as any).api?.windowIsMaximized?.();
+                if (toFullscreen) {
+                  // 진입: 현재 최대화 상태 저장 + 최대화
+                  fsWasMaxRef.current = !!isMax;
+                  if (!isMax) await (window as any).api?.windowToggleMaximize?.();
+                } else {
+                  // 해제: 진입 전 최대화가 아니었으면 원래대로 복원
+                  if (!fsWasMaxRef.current && isMax) await (window as any).api?.windowToggleMaximize?.();
+                }
+              } catch {}
+            })();
+            return toFullscreen ? tid : null;
+          });
+          setTimeout(() => { refitAllTerms(); focusTerm(tid); }, 150);
+        }
+        return;
+      }
       // Alt+1..9: 워크스페이스 내 모든 미니탭(모든 패널) 기준 N번째 탭으로 이동 (Alt+9는 마지막 탭)
       if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
         const m = /^Digit([1-9])$/.exec(e.code);
@@ -543,8 +590,8 @@ function App() {
       if (layout.id !== panelId) return null;
       const sess = layout.panel.sessions[layout.panel.activeIdx];
       if (!sess) return null;
-      // globalConnected 체크는 TerminalPanel 모듈에 있어서 직접 접근 불가
-      // termId로 SSH 연결 상태를 IPC로 확인하는 대신, 세션이 있으면 재연결 시도
+      // 로컬 쉘(PTY)이 실행 중이면 재사용하지 않음 → 새 미니탭 생성
+      if (isTermPty(sess.termId)) return null;
       return sess;
     }
     for (const c of layout.children) { const r = findDisconnectedActiveSession(c, panelId); if (r) return r; }
@@ -604,7 +651,12 @@ function App() {
             // 연결 중이면 → 같은 패널에 새 미니탭으로 추가
             const { layout, termId } = addSessionToPanel(activeTab.layout, selectedPanelId!, sessionId, displayName);
             setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, layout } : t));
-            setTimeout(() => (window as any).api.connectSSH(termId, sessionId), 0);
+            setTimeout(async () => {
+              const r = await (window as any).api.connectSSH(termId, sessionId);
+              if (r === 'need-password') {
+                promptPasswordAndConnect(termId, sessionId);
+              }
+            }, 0);
             applySessionTheme(termId); registerTerm(termId);
           } else {
             // 끊겨있으면 → 기존 termId 유지, 세션 정보만 교체 후 재연결
@@ -622,7 +674,12 @@ function App() {
               }
               return walk(layout);
             });
-            setTimeout(() => (window as any).api.connectSSH(activeSess.termId, sessionId), 100);
+            setTimeout(async () => {
+              const r = await (window as any).api.connectSSH(activeSess.termId, sessionId);
+              if (r === 'need-password') {
+                promptPasswordAndConnect(activeSess.termId, sessionId);
+              }
+            }, 100);
             applySessionTheme(activeSess.termId); registerTerm(activeSess.termId);
           }
         };
@@ -745,7 +802,7 @@ function App() {
         { label: showQuickConnect ? '빠른 연결 바 숨기기' : '빠른 연결 바 표시', action: () => setShowQuickConnect(v => !v) },
         { separator: true, label: '' },
         { label: '세션 내보내기...', action: () => (window as any).api.exportSessions() },
-        { label: '세션 가져오기...', action: async () => { const r = await (window as any).api.importSessions(); if (r) { window.dispatchEvent(new Event('sessions-reload')); alert('세션을 성공적으로 가져왔습니다.'); } } },
+        { label: '세션 가져오기...', action: async () => { const r = await (window as any).api.importSessions(); if (r) { window.dispatchEvent(new Event('sessions-reload')); showToast(r.addedCount != null ? `${r.addedCount}개 세션 가져옴 (총 ${r.totalParsed}개 중)` : '세션을 가져왔습니다.'); } } },
         { separator: true, label: '' },
         { label: '종료', action: () => window.close() },
       ],
@@ -754,7 +811,7 @@ function App() {
       label: '편집',
       items: [
         { label: '복사', shortcut: 'Ctrl+Shift+C', action: () => document.execCommand('copy') },
-        { label: '붙여넣기', shortcut: 'Ctrl+Shift+V', action: () => { navigator.clipboard.readText().then(text => { const tid = getActiveTermId(); if (tid) (window as any).api?.sendSSHInput?.(tid, text); }); } },
+        { label: '붙여넣기', shortcut: 'Ctrl+Shift+V', action: () => { navigator.clipboard.readText().then(text => { const tid = getActiveTermId(); if (!tid) return; pasteToTerm(tid, text); }); } },
         { separator: true, label: '' },
         { label: '찾기', shortcut: 'Ctrl+Shift+F', action: () => setShowSearch(true) },
       ],
@@ -838,6 +895,7 @@ function App() {
           'Ctrl+마우스 휠 — 글꼴 크기 조절\n\n' +
           '── 탭/워크스페이스 ──\n' +
           'Alt+1~9 — 미니탭 전환\n' +
+          'Alt+Enter — 현재 미니탭 전체화면 토글\n' +
           'Ctrl+Tab — 다음 미니탭\n' +
           'Ctrl+Shift+Tab — 이전 미니탭\n' +
           'F2 — 이름 변경\n' +
@@ -887,7 +945,7 @@ function App() {
   ];
 
   return (
-    <div className={`app-root${showBroadcast ? ' has-broadcast' : ''}`}>
+    <div className={`app-root${showBroadcast ? ' has-broadcast' : ''}${showQuickConnect ? ' has-quickconnect' : ''}${fullscreenTermId ? ' term-fullscreen' : ''}`} data-fs-term={fullscreenTermId || ''}>
       <SessionList
         onConnect={(sid, name, panelId, sessTheme, ff, fs, sb) => handleConnectSession(sid, name, panelId, sessTheme, ff, fs, sb)}
         onDisconnect={panelId => handleDisconnectSession(panelId)}
@@ -975,10 +1033,13 @@ function App() {
           />
         )}
 
-        {activeTab && activeTab.type === 'fileExplorer' && (
-          <FileExplorer sessions={
-            tabs.filter(t => t.type !== 'fileExplorer').flatMap(t => collectAllSessions(t.layout)).filter(s => s.sessionId)
-          } />
+        {/* FileExplorer는 탭이 존재하면 항상 마운트 유지 (경로 상태 보존). 비활성 시 CSS로 숨김 */}
+        {tabs.some(t => t.type === 'fileExplorer') && (
+          <div style={{ display: activeTab?.type === 'fileExplorer' ? 'flex' : 'none', flex: 1, minHeight: 0 }}>
+            <FileExplorer sessions={
+              tabs.filter(t => t.type !== 'fileExplorer').flatMap(t => collectAllSessions(t.layout)).filter(s => s.sessionId)
+            } />
+          </div>
         )}
 
         {activeTab && activeTab.type !== 'fileExplorer' && (

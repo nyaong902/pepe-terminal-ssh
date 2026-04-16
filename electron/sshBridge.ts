@@ -13,16 +13,18 @@ interface ClientRecord {
 }
 
 interface BridgeMessage {
-  type: 'data' | 'connected' | 'closed' | 'error' | 'sftp-progress' | 'sftp-complete' | 'sftp-error';
+  type: 'data' | 'connected' | 'closed' | 'error' | 'auth-prompt' | 'sftp-progress' | 'sftp-complete' | 'sftp-error';
   panelId: string;
   data?: string;
   error?: string;
+  prompts?: string[];
 }
 
 class SSHBridge extends EventEmitter {
   private clients: Map<string, ClientRecord> = new Map();
   private sftpCache: Map<string, any> = new Map();
   private scriptRunners: Map<string, ExpectSendRunner> = new Map();
+  private pendingAuth: Map<string, (responses: string[]) => void> = new Map();
 
   onMessage(fn: (m: BridgeMessage) => void) {
     this.on('message', fn);
@@ -97,13 +99,13 @@ class SSHBridge extends EventEmitter {
       host: session.host,
       port: session.port || 22,
       username: session.username,
-      tryKeyboard: false,
+      tryKeyboard: true,
       readyTimeout: 15000,
       keepaliveInterval: 10000,
       keepaliveCountMax: 3,
     } as any;
 
-    if (session.auth?.type === 'password') {
+    if (session.auth?.type === 'password' && session.auth.password) {
       cfg.password = session.auth.password;
     } else if (session.auth?.type === 'key') {
       try {
@@ -113,7 +115,27 @@ class SSHBridge extends EventEmitter {
       }
     }
 
+    // keyboard-interactive 인증 지원 (비밀번호 미저장 세션용)
+    conn.on('keyboard-interactive', (_name: string, _instructions: string, _lang: string, prompts: any[], finish: (responses: string[]) => void) => {
+      // 비밀번호가 있으면 자동 응답, 없으면 빈 응답 (renderer에서 처리)
+      if (cfg.password) {
+        finish([cfg.password]);
+      } else {
+        // renderer에 비밀번호 요청
+        this.emit('message', { type: 'auth-prompt', panelId, prompts: prompts.map((p: any) => p.prompt) });
+        this.pendingAuth.set(panelId, finish);
+      }
+    });
+
     conn.connect(cfg);
+  }
+
+  handleAuthResponse(panelId: string, responses: string[]) {
+    const finish = this.pendingAuth.get(panelId);
+    if (finish) {
+      finish(responses);
+      this.pendingAuth.delete(panelId);
+    }
   }
 
   handleInput(panelId: string, data?: string, b64?: string) {
@@ -386,11 +408,67 @@ class SSHBridge extends EventEmitter {
     } catch { /* 타임스탬프 설정 실패해도 무시 */ }
   }
 
+  // 소스가 디렉토리인지 확인
+  private async isSrcDirectory(src: { mode: string; termId?: string; path: string }): Promise<boolean> {
+    try {
+      if (src.mode === 'local') {
+        const s = await fs.promises.stat(src.path);
+        return s.isDirectory();
+      } else {
+        const sftp = await this.getSftp(src.termId!);
+        const s: any = await new Promise((res, rej) => sftp.stat(src.path, (e: any, st: any) => e ? rej(e) : res(st)));
+        return s.isDirectory();
+      }
+    } catch { return false; }
+  }
+
+  // 대상 디렉토리 생성 (없으면)
+  private async ensureDstDir(dst: { mode: string; termId?: string; path: string }): Promise<void> {
+    try {
+      if (dst.mode === 'local') {
+        await fs.promises.mkdir(dst.path, { recursive: true });
+      } else {
+        const sftp = await this.getSftp(dst.termId!);
+        try {
+          await new Promise<void>((res, rej) => sftp.stat(dst.path, (e: any) => e ? rej(e) : res()));
+          return; // 이미 존재
+        } catch {}
+        await new Promise<void>((res, rej) => sftp.mkdir(dst.path, (e: any) => e ? rej(e) : res()));
+      }
+    } catch (err) { /* 이미 존재하면 무시 */ }
+  }
+
+  // 소스 디렉토리 내용 나열
+  private async listSrcDir(src: { mode: string; termId?: string; path: string }): Promise<string[]> {
+    if (src.mode === 'local') {
+      return await fs.promises.readdir(src.path);
+    } else {
+      const sftp = await this.getSftp(src.termId!);
+      const list: any[] = await new Promise((res, rej) => sftp.readdir(src.path, (e: any, l: any) => e ? rej(e) : res(l)));
+      return list.map((item: any) => item.filename);
+    }
+  }
+
   async handleTransfer(
     src: { mode: string; termId?: string; path: string },
     dst: { mode: string; termId?: string; path: string },
     filename: string,
   ): Promise<void> {
+    // 디렉토리면 재귀 복사
+    if (await this.isSrcDirectory(src)) {
+      await this.ensureDstDir(dst);
+      const entries = await this.listSrcDir(src);
+      const sep = (p: string) => (p.endsWith('/') || p.endsWith('\\')) ? '' : (src.mode === 'local' ? '\\' : '/');
+      const dsep = (p: string) => (p.endsWith('/') || p.endsWith('\\')) ? '' : (dst.mode === 'local' ? '\\' : '/');
+      for (const entry of entries) {
+        const childSrc = { ...src, path: src.path + sep(src.path) + entry };
+        const childDst = { ...dst, path: dst.path + dsep(dst.path) + entry };
+        await this.handleTransfer(childSrc, childDst, entry);
+      }
+      this.emit('message', { type: 'sftp-complete', panelId: 'transfer', data: JSON.stringify({ filename, direction: 'dir-done' }) });
+      return;
+    }
+
     // 소스 파일 속성 가져오기
     let srcStat: { size: number; atime: number; mtime: number };
     try { srcStat = await this.getSrcStat(src); } catch { srcStat = { size: -1, atime: 0, mtime: 0 }; }
