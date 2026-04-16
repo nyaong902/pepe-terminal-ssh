@@ -346,9 +346,22 @@ ipcMain.handle('sessions:reorder', (_e, { id, type, direction }: { id: string; t
     setChildOrder(parentId, order);
   } else if (direction === 'up') {
     if (idx > 0) {
-      // 위 항목과 swap
-      [order[idx], order[idx - 1]] = [order[idx - 1], order[idx]];
-      setChildOrder(parentId, order);
+      const prevId = order[idx - 1];
+      const prevIsFolder = sessionsData.folders.some(f => f.id === prevId);
+      if (prevIsFolder) {
+        // 위가 폴더 → 그 폴더 안으로 진입 (마지막 자식으로)
+        removeFromChildOrder(parentId, id);
+        if (type === 'session') {
+          sessionsData.sessions.find(s => s.id === id)!.folderId = prevId;
+        } else {
+          sessionsData.folders.find(f => f.id === id)!.parentId = prevId;
+        }
+        addToChildOrder(prevId, id, 'last');
+      } else {
+        // 위가 세션 → swap
+        [order[idx], order[idx - 1]] = [order[idx - 1], order[idx]];
+        setChildOrder(parentId, order);
+      }
     } else if (parentId) {
       // 폴더 맨 위 → 부모 폴더로 올라감
       removeFromChildOrder(parentId, id);
