@@ -2,6 +2,8 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
+import { execSync } from 'child_process';
 import * as pty from 'node-pty';
 import { fileURLToPath } from 'url';
 import { loadSessionsData, saveSessionsData, getSessionsPath, saveCustomPath, loadUIPrefs, saveUIPrefs, Session, Folder, SessionsData } from './sessionsStore';
@@ -120,6 +122,9 @@ app.whenReady().then(() => {
       case 'error':
         connectingPanels.delete(msg.panelId);
         mainWindow.webContents.send('ssh:error', { panelId: msg.panelId, error: msg.error });
+        break;
+      case 'auth-prompt':
+        mainWindow.webContents.send('ssh:auth-prompt', { panelId: msg.panelId, prompts: msg.prompts });
         break;
       case 'sftp-progress':
         mainWindow.webContents.send('sftp:progress', { panelId: msg.panelId, data: msg.data });
@@ -310,30 +315,263 @@ ipcMain.handle('sessions:import', async () => {
   if (!mainWindow) return null;
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Import Sessions',
-    filters: [{ name: 'JSON', extensions: ['json'] }],
+    filters: [
+      { name: 'All Supported', extensions: ['json', 'xml', 'xts'] },
+      { name: 'PePe Terminal JSON', extensions: ['json'] },
+      { name: 'SecureCRT XML', extensions: ['xml'] },
+      { name: 'Xshell Backup (xts)', extensions: ['xts'] },
+    ],
     properties: ['openFile'],
   });
   if (result.canceled || result.filePaths.length === 0) return null;
+  const filePath = result.filePaths[0];
+  const ext = path.extname(filePath).toLowerCase();
   try {
-    const raw = JSON.parse(fs.readFileSync(result.filePaths[0], 'utf8'));
-    const imported: SessionsData = Array.isArray(raw)
-      ? { folders: [], sessions: raw }
-      : { folders: raw.folders ?? [], sessions: raw.sessions ?? [] };
-    // 기존 데이터에 머지 (중복 ID는 덮어쓰기)
-    for (const f of imported.folders) {
-      const idx = sessionsData.folders.findIndex(x => x.id === f.id);
-      if (idx >= 0) sessionsData.folders[idx] = f;
-      else sessionsData.folders.push(f);
+    let imported: SessionsData;
+    if (ext === '.xml') {
+      imported = parseSecureCRTXml(filePath);
+    } else if (ext === '.xts') {
+      imported = parseXshellXts(filePath);
+    } else {
+      const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      imported = Array.isArray(raw)
+        ? { folders: [], sessions: raw }
+        : { folders: raw.folders ?? [], sessions: raw.sessions ?? [] };
     }
+    // 기존 데이터에 머지 (중복: host+port+username 동일하면 스킵)
+    for (const f of imported.folders) {
+      const exists = sessionsData.folders.some(x => x.name === f.name && x.parentId === f.parentId);
+      if (!exists) sessionsData.folders.push(f);
+      else {
+        // 같은 이름+부모의 기존 폴더 ID로 세션의 folderId를 매핑
+        const existing = sessionsData.folders.find(x => x.name === f.name && x.parentId === f.parentId)!;
+        for (const s of imported.sessions) {
+          if (s.folderId === f.id) s.folderId = existing.id;
+        }
+        // 하위 폴더의 parentId도 매핑
+        for (const cf of imported.folders) {
+          if (cf.parentId === f.id) cf.parentId = existing.id;
+        }
+      }
+    }
+    let addedCount = 0;
     for (const s of imported.sessions) {
-      const idx = sessionsData.sessions.findIndex(x => x.id === s.id);
-      if (idx >= 0) sessionsData.sessions[idx] = s;
-      else sessionsData.sessions.push(s);
+      const dup = sessionsData.sessions.some(x => x.host === s.host && x.port === s.port && x.username === s.username && x.name === s.name);
+      if (!dup) { sessionsData.sessions.push(s); addedCount++; }
     }
     saveSessionsData(sessionsData);
-    return sessionsData;
-  } catch { return null; }
+    return { data: sessionsData, addedCount, totalParsed: imported.sessions.length };
+  } catch (err: any) { console.error('Import error:', err); return null; }
 });
+
+// ── SecureCRT XML 파서 ──
+function parseSecureCRTXml(filePath: string): SessionsData {
+  const xml = fs.readFileSync(filePath, 'utf8');
+  const lines = xml.split('\n');
+  const folders: Folder[] = [];
+  const sessions: Session[] = [];
+
+  let inSessions = false;
+  let depth = 0;
+  const keyStack: { name: string; folderId?: string; props: Record<string, string> }[] = [];
+
+  for (const line of lines) {
+    if (line.includes('<key name="Sessions">')) { inSessions = true; depth = 0; continue; }
+    if (!inSessions) continue;
+
+    const keyMatch = line.match(/<key name="([^"]+)">/);
+    if (keyMatch) {
+      depth++;
+      const parentFolderId = keyStack.length > 0 ? keyStack[keyStack.length - 1].folderId : undefined;
+      keyStack.push({ name: keyMatch[1], folderId: undefined, props: {} });
+      // 부모 폴더 ID 기억
+      keyStack[keyStack.length - 1].folderId = `folder-scrt-${Date.now()}-${depth}-${Math.random().toString(36).slice(2, 6)}`;
+      keyStack[keyStack.length - 1].props['_parentFolderId'] = parentFolderId || '';
+      continue;
+    }
+
+    if (line.includes('</key>')) {
+      if (keyStack.length > 0) {
+        const item = keyStack.pop()!;
+        const hostname = item.props['Hostname'];
+        if (hostname) {
+          // 이것은 세션
+          const portStr = item.props['[SSH2] Port'] || '22';
+          const username = item.props['Username'] || '';
+          const encodingRaw = item.props['Output Transformer Name'] || '';
+          let encoding = 'utf-8';
+          if (encodingRaw.toLowerCase().includes('euc-kr') || encodingRaw.toLowerCase().includes('euc_kr')) encoding = 'euc-kr';
+          else if (encodingRaw.toLowerCase().includes('cp949')) encoding = 'cp949';
+          else if (encodingRaw.toLowerCase().includes('utf-8') || encodingRaw.toLowerCase().includes('utf8') || encodingRaw === 'UTF-8') encoding = 'utf-8';
+          else if (encodingRaw) encoding = encodingRaw.toLowerCase();
+
+          const parentFolderId = item.props['_parentFolderId'] || undefined;
+          sessions.push({
+            id: `sess-scrt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name: item.name,
+            host: hostname,
+            port: parseInt(portStr, 10) || 22,
+            username,
+            encoding,
+            folderId: parentFolderId || undefined,
+            auth: { type: 'password', password: '' },
+          });
+        } else {
+          // 하위 세션이 있었다면 이것은 폴더
+          const hasSessions = sessions.some(s => s.folderId === item.folderId);
+          const hasSubFolders = folders.some(f => f.parentId === item.folderId);
+          if (hasSessions || hasSubFolders) {
+            const parentFolderId = item.props['_parentFolderId'] || undefined;
+            folders.push({
+              id: item.folderId!,
+              name: item.name,
+              parentId: parentFolderId || undefined,
+            });
+          }
+        }
+      }
+      depth--;
+      if (depth < 0) break;
+      continue;
+    }
+
+    // 프로퍼티 파싱
+    if (keyStack.length > 0) {
+      const strMatch = line.match(/<string name="([^"]+)">([^<]*)<\/string>/);
+      if (strMatch) { keyStack[keyStack.length - 1].props[strMatch[1]] = strMatch[2]; continue; }
+      const dwordMatch = line.match(/<dword name="([^"]+)">(\d+)<\/dword>/);
+      if (dwordMatch) { keyStack[keyStack.length - 1].props[dwordMatch[1]] = dwordMatch[2]; continue; }
+      const emptyStr = line.match(/<string name="([^"]+)"\/>/);
+      if (emptyStr) { keyStack[keyStack.length - 1].props[emptyStr[1]] = ''; continue; }
+    }
+  }
+
+  return { folders, sessions };
+}
+
+// ── Xshell xts(ZIP) 파서 ──
+function parseXshellXts(filePath: string): SessionsData {
+  const folders: Folder[] = [];
+  const sessions: Session[] = [];
+  const folderMap = new Map<string, string>(); // path → folderId
+
+  // 임시 디렉토리에 추출
+  const tmpDir = path.join(os.tmpdir(), `pepe-xshell-import-${Date.now()}`);
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  try {
+    // PowerShell Expand-Archive는 .zip만 허용하므로 .xts → .zip 복사 후 추출
+    const zipCopy = path.join(tmpDir, 'import.zip');
+    fs.copyFileSync(filePath, zipCopy);
+    execSync(`powershell -Command "Expand-Archive -Path '${zipCopy}' -DestinationPath '${tmpDir}' -Force"`, { timeout: 30000 });
+    try { fs.unlinkSync(zipCopy); } catch {}
+
+    // Xshell 폴더 찾기
+    const xshellDir = path.join(tmpDir, 'Xshell');
+    if (!fs.existsSync(xshellDir)) {
+      // Xshell 폴더가 없으면 tmpDir 자체를 탐색
+      walkXshellDir(tmpDir, '', folders, sessions, folderMap);
+    } else {
+      walkXshellDir(xshellDir, '', folders, sessions, folderMap);
+    }
+  } finally {
+    // 임시 디렉토리 정리
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+
+  return { folders, sessions };
+}
+
+// Xshell encoding 숫자 → 문자열 매핑
+function xshellEncodingMap(val: string): string {
+  switch (val) {
+    case '2': return 'euc-kr';
+    case '0': case '65001': return 'utf-8';
+    case '1': return 'cp949';
+    case '28591': return 'latin1';
+    default: return 'utf-8';
+  }
+}
+
+function getOrCreateFolder(folderPath: string, folders: Folder[], folderMap: Map<string, string>): string | undefined {
+  if (!folderPath || folderPath === '.') return undefined;
+  if (folderMap.has(folderPath)) return folderMap.get(folderPath)!;
+
+  const parts = folderPath.split(/[\\/]/);
+  let currentPath = '';
+  let parentId: string | undefined;
+
+  for (const part of parts) {
+    currentPath = currentPath ? `${currentPath}/${part}` : part;
+    if (folderMap.has(currentPath)) {
+      parentId = folderMap.get(currentPath)!;
+      continue;
+    }
+    const folderId = `folder-xsh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    folders.push({ id: folderId, name: part, parentId });
+    folderMap.set(currentPath, folderId);
+    parentId = folderId;
+  }
+  return parentId;
+}
+
+function walkXshellDir(dir: string, relPath: string, folders: Folder[], sessions: Session[], folderMap: Map<string, string>) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      walkXshellDir(fullPath, relPath ? `${relPath}/${entry.name}` : entry.name, folders, sessions, folderMap);
+    } else if (entry.name.endsWith('.xsh')) {
+      try {
+        const buf = fs.readFileSync(fullPath);
+        const txt = buf.toString('utf16le');
+        const lines = txt.split(/\r?\n/);
+        let host = '', port = '22', user = '', enc = 'utf-8';
+        let useExpectSend = false, expectSendCount = 0;
+        const expectMap: Record<string, string> = {};
+        const sendMap: Record<string, string> = {};
+        for (const l of lines) {
+          const m = l.match(/^(.+?)=(.*)$/);
+          if (!m) continue;
+          const k = m[1].trim(), v = m[2].trim();
+          if (k === 'Host') host = v;
+          if (k === 'Port') port = v;
+          if (k === 'UserName') user = v;
+          if (k === 'Encoding') enc = xshellEncodingMap(v);
+          if (k === 'UseExpectSend' && v === '1') useExpectSend = true;
+          if (k === 'ExpectSend_Count') expectSendCount = parseInt(v, 10) || 0;
+          const expectMatch = k.match(/^ExpectSend_Expect_(\d+)$/);
+          if (expectMatch) expectMap[expectMatch[1]] = v;
+          const sendMatch = k.match(/^ExpectSend_Send_(\d+)$/);
+          if (sendMatch) sendMap[sendMatch[1]] = v;
+        }
+        if (host) {
+          const folderId = getOrCreateFolder(relPath, folders, folderMap);
+          const name = entry.name.replace(/\.xsh$/, '');
+          // Expect/Send 로그인 스크립트 변환
+          const loginScript: { expect: string; send: string }[] = [];
+          if (useExpectSend && expectSendCount > 0) {
+            for (let i = 0; i < expectSendCount; i++) {
+              const expect = expectMap[String(i)] ?? '';
+              const send = sendMap[String(i)] ?? '';
+              if (send) loginScript.push({ expect, send });
+            }
+          }
+          sessions.push({
+            id: `sess-xsh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name,
+            host,
+            port: parseInt(port, 10) || 22,
+            username: user,
+            encoding: enc,
+            folderId,
+            auth: { type: 'password', password: '' },
+            loginScript: loginScript.length > 0 ? loginScript : undefined,
+          });
+        }
+      } catch {}
+    }
+  }
+}
 
 // ── 파일 탐색기 IPC ──
 
@@ -546,6 +784,12 @@ ipcMain.handle('window:toggle-maximize', () => {
 ipcMain.handle('window:is-maximized', () => isMaximized);
 ipcMain.handle('window:close', () => mainWindow?.close());
 
+ipcMain.handle('ssh:auth-response', (_e, { panelId, responses }: { panelId: string; responses: string[] }) => {
+  const bridge = getSSHBridge();
+  bridge.handleAuthResponse(panelId, responses);
+  return 'ok';
+});
+
 ipcMain.handle('ssh:reset-state', (_e, panelId: string) => {
   connectedPanels.delete(panelId);
   connectingPanels.delete(panelId);
@@ -559,10 +803,29 @@ ipcMain.handle('ssh:connect', (_e, { panelId, sessionId, cols, rows }) => {
   const session = sessionsData.sessions.find(s => s.id === sessionId);
   if (!session) throw new Error('Session not found');
 
+  // 비밀번호가 비어있으면 renderer에 비밀번호 요청
+  const needsPassword = !session.auth || (session.auth.type === 'password' && !session.auth.password);
+  if (needsPassword) {
+    return 'need-password';
+  }
+
   connectingPanels.add(panelId);
 
   const bridge = getSSHBridge();
   bridge.handleConnect(panelId, session, cols, rows);
+  return 'ok';
+});
+
+ipcMain.handle('ssh:connect-with-password', (_e, { panelId, sessionId, password, cols, rows }) => {
+  if (connectingPanels.has(panelId)) return 'already';
+  if (connectedPanels.has(panelId)) return 'already';
+  const session = sessionsData.sessions.find(s => s.id === sessionId);
+  if (!session) throw new Error('Session not found');
+  connectingPanels.add(panelId);
+  const bridge = getSSHBridge();
+  // 임시로 비밀번호를 설정해서 연결
+  const sessionWithPw = { ...session, auth: { type: 'password' as const, password } };
+  bridge.handleConnect(panelId, sessionWithPw, cols, rows);
   return 'ok';
 });
 

@@ -70,6 +70,8 @@ contextBridge.exposeInMainWorld('api', {
   resetSSHState: (panelId: string) => ipcRenderer.invoke('ssh:reset-state', panelId),
   connectSSH: (panelId: string, sessionId: string, cols?: number, rows?: number) =>
     ipcRenderer.invoke('ssh:connect', { panelId, sessionId, cols, rows }),
+  connectSSHWithPassword: (panelId: string, sessionId: string, password: string, cols?: number, rows?: number) =>
+    ipcRenderer.invoke('ssh:connect-with-password', { panelId, sessionId, password, cols, rows }),
   quickConnectSSH: (panelId: string, session: any, cols?: number, rows?: number) =>
     ipcRenderer.invoke('ssh:quick-connect', { panelId, session, cols, rows }),
   isSSHConnected: (panelId: string) =>
@@ -134,4 +136,11 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('ssh:error', handler);
     return () => ipcRenderer.removeListener('ssh:error', handler);
   },
+  onSSHAuthPrompt: (cb: (p: any) => void) => {
+    const handler = (_: any, p: any) => cb(p);
+    ipcRenderer.on('ssh:auth-prompt', handler);
+    return () => ipcRenderer.removeListener('ssh:auth-prompt', handler);
+  },
+  sshAuthResponse: (panelId: string, responses: string[]) =>
+    ipcRenderer.invoke('ssh:auth-response', { panelId, responses }),
 });
