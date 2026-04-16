@@ -38,8 +38,9 @@ const NodeView: React.FC<NodeProps> = ({ node, ...h }) => {
       const from = e.dataTransfer?.getData('text/panel-id');
       if (from && h.onMovePanel) h.onMovePanel(from, node.id, 'inside');
     };
+    const activeTermId = node.panel.sessions[node.panel.activeIdx]?.termId || '';
     return (
-      <div className="layout-leaf">
+      <div className="layout-leaf" data-active-term={activeTermId}>
         <div className={`layout-leaf-inner ${h.selectedPanelId === node.id ? 'selected' : ''}`}
           onDragOver={e => e.preventDefault()} onDrop={handleDrop}
         >

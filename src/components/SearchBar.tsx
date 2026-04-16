@@ -37,8 +37,11 @@ export const SearchBar: React.FC<Props> = ({ tabs, activeTab, selectedPanelId, o
   const [query, setQuery] = useState('');
   const [mode, setMode] = useState<'current' | 'all'>('current');
   const [useRegex, setUseRegex] = useState(false);
+  const [caseSensitive, setCaseSensitive] = useState(false);
   const [matches, setMatches] = useState<MatchResult[]>([]);
   const [activeMatchIdx, setActiveMatchIdx] = useState(0);
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyIdx, setHistoryIdx] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -58,7 +61,7 @@ export const SearchBar: React.FC<Props> = ({ tabs, activeTab, selectedPanelId, o
     } catch {}
   }, [mode]);
 
-  // query/regex 변경 시 모든 매치 하이라이트 + 맨 위부터 검색 시작
+  // query/regex/caseSensitive 변경 시 모든 매치 하이라이트 + 맨 위부터 검색 시작
   useEffect(() => {
     if (!query) {
       for (const tid of getAllTermIds()) clearHighlights(tid);
@@ -67,18 +70,18 @@ export const SearchBar: React.FC<Props> = ({ tabs, activeTab, selectedPanelId, o
     if (mode === 'current') {
       const termId = getActiveTermId();
       if (termId) {
-        highlightAllMatches(termId, query, useRegex);
-        searchFromTop(termId, query, useRegex);
+        highlightAllMatches(termId, query, useRegex, caseSensitive);
+        searchFromTop(termId, query, useRegex, caseSensitive);
       }
     } else {
       for (const tab of tabs) {
         const sessions = collectAllSessions(tab.layout);
         for (const sess of sessions) {
-          highlightAllMatches(sess.termId, query, useRegex);
+          highlightAllMatches(sess.termId, query, useRegex, caseSensitive);
         }
       }
     }
-  }, [query, useRegex, mode]);
+  }, [query, useRegex, caseSensitive, mode]);
 
   const getActiveTermId = (): string | null => {
     if (!selectedPanelId) return null;
@@ -98,7 +101,7 @@ export const SearchBar: React.FC<Props> = ({ tabs, activeTab, selectedPanelId, o
   const searchCurrent = () => {
     const termId = getActiveTermId();
     if (!termId || !query) return;
-    searchInTerm(termId, query, useRegex);
+    searchInTerm(termId, query, useRegex, caseSensitive);
   };
 
   const searchAll = () => {
@@ -108,7 +111,7 @@ export const SearchBar: React.FC<Props> = ({ tabs, activeTab, selectedPanelId, o
         const sessions = collectAllSessions(tab.layout);
         for (const sess of sessions) {
           try {
-            const found = searchInTerm(sess.termId, query, useRegex);
+            const found = searchInTerm(sess.termId, query, useRegex, caseSensitive);
             if (found) {
               results.push({ termId: sess.termId, sessionName: sess.sessionName, tabTitle: tab.title });
             }
@@ -129,24 +132,24 @@ export const SearchBar: React.FC<Props> = ({ tabs, activeTab, selectedPanelId, o
   const handleNext = () => {
     if (mode === 'current') {
       const termId = getActiveTermId();
-      if (termId && query) searchNextInTerm(termId, query, useRegex);
+      if (termId && query) searchNextInTerm(termId, query, useRegex, caseSensitive);
     } else {
       if (matches.length === 0) return;
       const nextIdx = (activeMatchIdx + 1) % matches.length;
       setActiveMatchIdx(nextIdx);
-      searchNextInTerm(matches[nextIdx].termId, query, useRegex);
+      searchNextInTerm(matches[nextIdx].termId, query, useRegex, caseSensitive);
     }
   };
 
   const handlePrev = () => {
     if (mode === 'current') {
       const termId = getActiveTermId();
-      if (termId && query) searchPrevInTerm(termId, query, useRegex);
+      if (termId && query) searchPrevInTerm(termId, query, useRegex, caseSensitive);
     } else {
       if (matches.length === 0) return;
       const prevIdx = (activeMatchIdx - 1 + matches.length) % matches.length;
       setActiveMatchIdx(prevIdx);
-      searchPrevInTerm(matches[prevIdx].termId, query, useRegex);
+      searchPrevInTerm(matches[prevIdx].termId, query, useRegex, caseSensitive);
     }
   };
 
@@ -157,9 +160,31 @@ export const SearchBar: React.FC<Props> = ({ tabs, activeTab, selectedPanelId, o
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     e.stopPropagation();
-    if (e.key === 'Escape') { handleClose(); return; }
+    if (e.key === 'Escape') {
+      if (showHistory) { setShowHistory(false); setHistoryIdx(-1); return; }
+      handleClose(); return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (searchHistory.length === 0) return;
+      if (!showHistory) { setShowHistory(true); setHistoryIdx(0); setQuery(searchHistory[0]); return; }
+      const next = Math.min(historyIdx + 1, searchHistory.length - 1);
+      setHistoryIdx(next);
+      setQuery(searchHistory[next]);
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (!showHistory) return;
+      const next = historyIdx - 1;
+      if (next < 0) { setHistoryIdx(-1); setShowHistory(false); return; }
+      setHistoryIdx(next);
+      setQuery(searchHistory[next]);
+      return;
+    }
     if (e.key === 'Enter') {
       e.preventDefault();
+      setShowHistory(false); setHistoryIdx(-1);
       if (!query) return;
       addSearchHistory(query);
       if (e.shiftKey) handlePrev();
@@ -171,25 +196,49 @@ export const SearchBar: React.FC<Props> = ({ tabs, activeTab, selectedPanelId, o
   const stopProp = (e: React.SyntheticEvent) => e.stopPropagation();
 
   return (
-    <div className="search-bar" onKeyDown={stopProp} onKeyUp={stopProp} onKeyPress={stopProp} onMouseDown={stopProp} onClick={stopProp}>
+    <div className="search-bar" onKeyDown={stopProp} onKeyUp={stopProp} onKeyPress={stopProp} onMouseDown={stopProp} onClick={stopProp} onDoubleClick={stopProp}>
       <div className="search-bar-inner">
         <span className="search-icon">🔍</span>
-        <input
-          ref={inputRef}
-          className="search-input"
-          type="text"
-          list="search-history-list"
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="검색..."
-          autoComplete="off"
-        />
-        <datalist id="search-history-list">
-          {searchHistory.map((h, i) => <option key={`${h}-${i}`} value={h} />)}
-        </datalist>
+        <div style={{ position: 'relative', display: 'inline-block' }}>
+          <div style={{ display: 'flex' }}>
+            <input
+              ref={inputRef}
+              className="search-input"
+              type="text"
+              value={query}
+              onChange={e => { setQuery(e.target.value); setShowHistory(false); setHistoryIdx(-1); }}
+              onKeyDown={handleKeyDown}
+              onFocus={() => { if (searchHistory.length > 0) setShowHistory(true); }}
+              onBlur={() => { setTimeout(() => setShowHistory(false), 150); }}
+              placeholder="검색..."
+              autoComplete="off"
+            />
+            <button
+              className="search-history-toggle"
+              onClick={() => { setShowHistory(prev => !prev); inputRef.current?.focus(); }}
+              title="검색 이력"
+              tabIndex={-1}
+            >▾</button>
+          </div>
+          {showHistory && searchHistory.length > 0 && (
+            <div className="search-history-dropdown">
+              {searchHistory.map((h, i) => (
+                <div
+                  key={`${h}-${i}`}
+                  className={`search-history-item ${i === historyIdx ? 'active' : ''}`}
+                  onMouseDown={e => { e.preventDefault(); setQuery(h); setShowHistory(false); setHistoryIdx(-1); inputRef.current?.focus(); }}
+                >{h}</div>
+              ))}
+            </div>
+          )}
+        </div>
         <button className="search-btn" onClick={handlePrev} title="Previous (Shift+Enter)">&#9650;</button>
         <button className="search-btn" onClick={handleNext} title="Next (Enter)">&#9660;</button>
+        <button
+          className={`search-regex-btn ${caseSensitive ? 'active' : ''}`}
+          onClick={() => setCaseSensitive(prev => !prev)}
+          title="Case Sensitive"
+        >Aa</button>
         <button
           className={`search-regex-btn ${useRegex ? 'active' : ''}`}
           onClick={() => setUseRegex(prev => !prev)}
@@ -220,7 +269,7 @@ export const SearchBar: React.FC<Props> = ({ tabs, activeTab, selectedPanelId, o
             <span
               key={m.termId}
               className={`search-match-item ${i === activeMatchIdx ? 'active' : ''}`}
-              onClick={() => { setActiveMatchIdx(i); searchInTerm(m.termId, query, useRegex); }}
+              onClick={() => { setActiveMatchIdx(i); searchInTerm(m.termId, query, useRegex, caseSensitive); }}
             >
               {m.tabTitle} &gt; {m.sessionName}
             </span>

@@ -264,7 +264,7 @@ function getHighlightContainer(termId: string): HTMLDivElement | null {
   return container;
 }
 
-function renderHighlightOverlay(termId: string, query: string, regex: boolean) {
+function renderHighlightOverlay(termId: string, query: string, regex: boolean, caseSensitive = false) {
   const container = getHighlightContainer(termId);
   if (container) container.innerHTML = '';
   if (!container || !query) return;
@@ -276,7 +276,8 @@ function renderHighlightOverlay(termId: string, query: string, regex: boolean) {
 
   let re: RegExp;
   try {
-    re = regex ? new RegExp(query, 'gi') : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    const flags = caseSensitive ? 'g' : 'gi';
+    re = regex ? new RegExp(query, flags) : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
   } catch { return; }
 
   // 셀 크기 계산 — xterm 내부 _core._renderService.dimensions 에서 정확한 값 추출,
@@ -308,13 +309,30 @@ function renderHighlightOverlay(termId: string, query: string, regex: boolean) {
     const bufLine = buf.getLine(vStart + row);
     if (!bufLine) continue;
     const text = bufLine.translateToString();
+
+    // charIndex → cellColumn 매핑 (한글 등 wide char 보정)
+    const charToCell: number[] = [];
+    let cellCol = 0;
+    for (let ci = 0; ci < bufLine.length; ci++) {
+      const cell = bufLine.getCell(ci);
+      if (!cell) break;
+      const ch = cell.getChars();
+      if (ch === '') continue; // wide char의 두 번째 셀은 건너뜀
+      charToCell.push(cellCol);
+      const w = cell.getWidth();
+      cellCol += w || 1;
+    }
+
     re.lastIndex = 0;
     let match;
     while ((match = re.exec(text)) !== null) {
       if (match[0].length === 0) { re.lastIndex++; continue; }
+      const startCell = charToCell[match.index] ?? match.index;
+      const endCharIdx = match.index + match[0].length;
+      const endCell = endCharIdx < charToCell.length ? charToCell[endCharIdx] : (charToCell[charToCell.length - 1] ?? endCharIdx) + 1;
       const span = document.createElement('div');
       span.className = 'search-highlight-mark';
-      span.style.cssText = `position:absolute;top:${offsetTop + row * cellH}px;left:${offsetLeft + match.index * cellW}px;width:${match[0].length * cellW}px;height:${cellH}px;`;
+      span.style.cssText = `position:absolute;top:${offsetTop + row * cellH}px;left:${offsetLeft + startCell * cellW}px;width:${(endCell - startCell) * cellW}px;height:${cellH}px;`;
       container.appendChild(span);
     }
   }
@@ -469,17 +487,17 @@ export function clearHighlights(termId: string) {
 // 활성 하이라이트 리스너 저장 (termId → cleanup 함수)
 const highlightListeners: Map<string, () => void> = new Map();
 
-export function highlightAllMatches(termId: string, query: string, regex: boolean) {
+export function highlightAllMatches(termId: string, query: string, regex: boolean, caseSensitive = false) {
   // 기존 리스너 정리
   const prevCleanup = highlightListeners.get(termId);
   if (prevCleanup) prevCleanup();
 
-  renderHighlightOverlay(termId, query, regex);
+  renderHighlightOverlay(termId, query, regex, caseSensitive);
 
   const entry = termStore.get(termId);
   if (!entry) return;
 
-  const handler = () => renderHighlightOverlay(termId, query, regex);
+  const handler = () => renderHighlightOverlay(termId, query, regex, caseSensitive);
 
   // 스크롤 시 갱신
   const xtermEl = (entry.term as any).element as HTMLElement | undefined;
@@ -501,38 +519,40 @@ export function highlightAllMatches(termId: string, query: string, regex: boolea
   });
 }
 
-export function searchFromTop(termId: string, query: string, regex = false): boolean {
+export function searchFromTop(termId: string, query: string, regex = false, caseSensitive = false): boolean {
   try {
     const entry = termStore.get(termId);
     if (!entry || !query) return false;
+    entry.search.clearDecorations();
     // 선택 해제 → findNext가 버퍼 맨 위부터 검색
     entry.term.clearSelection();
     entry.term.scrollToTop();
-    return entry.search.findNext(query, { regex });
+    return entry.search.findNext(query, { regex, caseSensitive });
   } catch { return false; }
 }
 
-export function searchInTerm(termId: string, query: string, regex = false): boolean {
+export function searchInTerm(termId: string, query: string, regex = false, caseSensitive = false): boolean {
   try {
     const entry = termStore.get(termId);
     if (!entry || !query) return false;
-    return entry.search.findNext(query, { regex });
+    entry.search.clearDecorations();
+    return entry.search.findNext(query, { regex, caseSensitive });
   } catch { return false; }
 }
 
-export function searchNextInTerm(termId: string, query: string, regex = false): boolean {
+export function searchNextInTerm(termId: string, query: string, regex = false, caseSensitive = false): boolean {
   try {
     const entry = termStore.get(termId);
     if (!entry || !query) return false;
-    return entry.search.findNext(query, { regex });
+    return entry.search.findNext(query, { regex, caseSensitive });
   } catch { return false; }
 }
 
-export function searchPrevInTerm(termId: string, query: string, regex = false): boolean {
+export function searchPrevInTerm(termId: string, query: string, regex = false, caseSensitive = false): boolean {
   try {
     const entry = termStore.get(termId);
     if (!entry || !query) return false;
-    return entry.search.findPrevious(query, { regex });
+    return entry.search.findPrevious(query, { regex, caseSensitive });
   } catch { return false; }
 }
 

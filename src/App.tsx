@@ -137,6 +137,14 @@ function App() {
     setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; setTimeout(() => el.remove(), 300); }, duration);
   }, []);
 
+  useEffect(() => {
+    document.querySelectorAll('.layout-leaf.fs-visible').forEach(el => el.classList.remove('fs-visible'));
+    if (fullscreenTermId) {
+      const target = document.querySelector(`.layout-leaf[data-active-term="${fullscreenTermId}"]`);
+      if (target) target.classList.add('fs-visible');
+    }
+  }, [fullscreenTermId]);
+
   // 텍스트 일괄 전송 대상 termId 수집
   const collectBroadcastTargets = (scope: 'current' | 'visible' | 'connected'): string[] => {
     const ids: string[] = [];
@@ -642,6 +650,19 @@ function App() {
     // 선택된 패널의 활성 미니탭 확인
     if (selectedPanelId) {
       const activeSess = findDisconnectedActiveSession(activeTab.layout, selectedPanelId);
+      if (!activeSess) {
+        // 활성 세션 없거나 PTY 실행 중 → 선택된 패널에 새 미니탭으로 추가
+        const { layout, termId } = addSessionToPanel(activeTab.layout, selectedPanelId, sessionId, displayName);
+        setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, layout } : t));
+        setTimeout(async () => {
+          const r = await (window as any).api.connectSSH(termId, sessionId);
+          if (r === 'need-password') {
+            promptPasswordAndConnect(termId, sessionId);
+          }
+        }, 0);
+        applySessionTheme(termId); registerTerm(termId);
+        return;
+      }
       if (activeSess) {
         // 연결 상태 확인 후 분기
         const checkAndConnect = async () => {

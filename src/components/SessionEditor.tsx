@@ -124,7 +124,7 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
   };
 
   return (
-    <div className="session-editor-backdrop" onClick={onCancel}>
+    <div className="session-editor-backdrop">
       <div className="session-editor" onClick={e => e.stopPropagation()}>
         <h3>Session Editor</h3>
         <div className="session-editor-grid">

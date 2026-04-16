@@ -125,11 +125,53 @@ html, body {
   background: #111;
   color: #eee;
   border: 1px solid #333;
-  border-radius: 4px;
+  border-radius: 4px 0 0 4px;
   padding: 4px 8px;
   font-size: 12px;
   outline: none;
-  width: 200px;
+}
+
+.search-history-toggle {
+  background: #1a1a2e;
+  color: #888;
+  border: 1px solid #333;
+  border-left: none;
+  border-radius: 0 4px 4px 0;
+  padding: 2px 5px;
+  font-size: 10px;
+  cursor: pointer;
+  line-height: 1;
+}
+.search-history-toggle:hover {
+  color: #eee;
+  background: #2a2a3e;
+}
+
+.search-history-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: #1a1a2e;
+  border: 1px solid #333;
+  border-radius: 0 0 4px 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 100;
+}
+.search-history-item {
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #ccc;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search-history-item:hover,
+.search-history-item.active {
+  background: #2a2a4e;
+  color: #fff;
 }
 
 .search-input:focus {
@@ -478,11 +520,29 @@ html, body {
 .app-root.term-fullscreen .quick-connect-bar {
   display: none !important;
 }
-/* 전체화면 모드에서 비활성 패널 숨김 — 활성 패널만 꽉 채움 */
-.app-root.term-fullscreen .layout-leaf-inner:not(.selected) {
+/* 전체화면 모드 */
+.app-root.term-fullscreen .layout-divider {
   display: none !important;
 }
+.app-root.term-fullscreen .layout-child {
+  display: none !important;
+}
+.app-root.term-fullscreen .layout-child:has(.layout-leaf.fs-visible) {
+  display: flex !important;
+  flex: 1 1 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+}
+.app-root.term-fullscreen .layout-leaf.fs-visible {
+  flex: 1 1 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+}
+.app-root.term-fullscreen .layout-leaf:has(.layout-leaf-inner.selected) {
+  background: transparent !important;
+}
 .app-root.term-fullscreen .layout-root > *,
+.app-root.term-fullscreen .layout-container,
 .app-root.term-fullscreen .layout-row,
 .app-root.term-fullscreen .layout-column {
   flex: 1 !important;
@@ -892,6 +952,73 @@ html, body {
 .context-menu-item:hover {
   background: #2b6b9b;
   color: #fff;
+}
+.context-menu-separator {
+  height: 1px;
+  background: #333;
+  margin: 4px 0;
+}
+.folder-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 4000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.folder-picker {
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 12px;
+  min-width: 240px;
+  max-width: 360px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+.folder-picker-title {
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #333;
+}
+.folder-picker-list {
+  overflow-y: auto;
+  flex: 1;
+  margin-bottom: 8px;
+}
+.folder-picker-item {
+  padding: 6px 12px;
+  color: #ccc;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.1s;
+}
+.folder-picker-item:hover {
+  background: #2b6b9b;
+  color: #fff;
+}
+.folder-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.folder-picker-actions button {
+  background: #333;
+  color: #ccc;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 4px 14px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.folder-picker-actions button:hover {
+  background: #444;
 }
 
 /* ── Session icon ── */

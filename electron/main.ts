@@ -267,6 +267,14 @@ ipcMain.handle('sessions:save', (_e, s: Session) => {
   return sessionsData;
 });
 
+ipcMain.handle('sessions:move-to-folder', (_e, { sessionId, targetFolderId }: { sessionId: string; targetFolderId: string | null }) => {
+  const sess = sessionsData.sessions.find(s => s.id === sessionId);
+  if (!sess) return sessionsData;
+  sess.folderId = targetFolderId ?? undefined;
+  saveSessionsData(sessionsData);
+  return sessionsData;
+});
+
 ipcMain.handle('sessions:delete', (_e, id: string) => {
   sessionsData.sessions = sessionsData.sessions.filter(s => s.id !== id);
   saveSessionsData(sessionsData);

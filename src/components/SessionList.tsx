@@ -60,6 +60,8 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
   const [renameValue, setRenameValue] = useState('');
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string; type: 'session' | 'folder'; name: string } | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [folderPicker, setFolderPicker] = useState<{ sessionId: string } | null>(null);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const dragging = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -154,6 +156,20 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
   };
 
   const handleDelete = async () => {
+    // 다중 선택 삭제
+    if (selectedIds.size > 0) {
+      const ids = [...selectedIds];
+      if (!confirm(`${ids.length}개 항목을 삭제하시겠습니까?`)) return;
+      for (const id of ids) {
+        if (sessions.some(x => x.id === id)) await window.api?.deleteSession?.(id);
+        if (folders.some(x => x.id === id)) await (window as any).api.deleteFolder(id);
+      }
+      await reload();
+      setSelectedId(null);
+      setSelectedIds(new Set());
+      return;
+    }
+    // 단일 선택 삭제
     if (!selectedId) return;
     if (selectedType === 'folder') {
       const f = folders.find(x => x.id === selectedId);
@@ -243,9 +259,20 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
           return (
             <React.Fragment key={f.id}>
               <div
-                className={`session-item folder-item ${isSelected ? 'selected' : ''} ${dragOverId === f.id ? 'drag-over' : ''}`}
+                className={`session-item folder-item ${isSelected || selectedIds.has(f.id) ? 'selected' : ''} ${dragOverId === f.id ? 'drag-over' : ''}`}
                 style={{ paddingLeft: 8 + depth * 16 }}
-                onClick={() => { setSelectedId(f.id); setSelectedType('folder'); }}
+                onClick={e => {
+                  if (e.ctrlKey || e.metaKey) {
+                    setSelectedIds(prev => {
+                      const next = new Set(prev);
+                      if (next.size === 0 && selectedId) next.add(selectedId);
+                      next.has(f.id) ? next.delete(f.id) : next.add(f.id);
+                      return next;
+                    });
+                  } else {
+                    setSelectedId(f.id); setSelectedType('folder'); setSelectedIds(new Set());
+                  }
+                }}
                 onDoubleClick={() => toggleCollapse(f.id)}
                 onContextMenu={e => { e.preventDefault(); setSelectedId(f.id); setSelectedType('folder'); setContextMenu({ x: e.clientX, y: e.clientY, id: f.id, type: 'folder', name: f.name }); }}
                 onDragOver={e => { if (e.dataTransfer.types.includes('text/session-id')) { e.preventDefault(); e.stopPropagation(); setDragOverId(f.id); } }}
@@ -282,9 +309,20 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
         {childSessions.map(s => (
           <div
             key={s.id}
-            className={`session-item ${selectedId === s.id && selectedType === 'session' ? 'selected' : ''}`}
+            className={`session-item ${(selectedId === s.id && selectedType === 'session') || selectedIds.has(s.id) ? 'selected' : ''}`}
             style={{ paddingLeft: 8 + depth * 16 }}
-            onClick={() => { setSelectedId(s.id); setSelectedType('session'); }}
+            onClick={e => {
+              if (e.ctrlKey || e.metaKey) {
+                setSelectedIds(prev => {
+                  const next = new Set(prev);
+                  if (next.size === 0 && selectedId) next.add(selectedId);
+                  next.has(s.id) ? next.delete(s.id) : next.add(s.id);
+                  return next;
+                });
+              } else {
+                setSelectedId(s.id); setSelectedType('session'); setSelectedIds(new Set());
+              }
+            }}
             onDoubleClick={() => { if (renamingId !== s.id) handleConnect(s); }}
             onContextMenu={e => { e.preventDefault(); setSelectedId(s.id); setSelectedType('session'); setContextMenu({ x: e.clientX, y: e.clientY, id: s.id, type: 'session', name: s.name }); }}
             draggable={renamingId !== s.id}
@@ -375,7 +413,7 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
         <div
           className="session-list-scroll"
           tabIndex={0}
-          onClick={e => { if (e.target === e.currentTarget) { setSelectedId(null); setSelectedType('session'); } }}
+          onClick={e => { if (e.target === e.currentTarget) { setSelectedId(null); setSelectedType('session'); setSelectedIds(new Set()); } }}
           onKeyDown={e => {
             if (e.key === 'F2' && selectedId) {
               e.preventDefault();
@@ -441,6 +479,46 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
 
       {editing && <SessionEditor session={editing} folders={folders} onSave={onSaveSession} onCancel={() => setEditing(null)} />}
 
+      {folderPicker && (() => {
+        const renderTree = (parentId?: string, depth = 0): React.ReactNode[] => {
+          const children = folders.filter(f => (f.parentId ?? undefined) === parentId);
+          const nodes: React.ReactNode[] = [];
+          for (const f of children) {
+            const sess = sessions.find(s => s.id === folderPicker.sessionId);
+            if (sess && (sess.folderId ?? undefined) === f.id) continue;
+            nodes.push(
+              <div key={f.id} className="folder-picker-item" style={{ paddingLeft: 12 + depth * 16 }} onClick={() => {
+                (async () => { await (window as any).api.moveToFolder(folderPicker.sessionId, f.id); await reload(); })();
+                setFolderPicker(null);
+              }}>
+                📁 {f.name}
+              </div>
+            );
+            nodes.push(...renderTree(f.id, depth + 1));
+          }
+          return nodes;
+        };
+        return (
+          <div className="folder-picker-backdrop" onClick={() => setFolderPicker(null)}>
+            <div className="folder-picker" onClick={e => e.stopPropagation()}>
+              <div className="folder-picker-title">폴더로 이동</div>
+              <div className="folder-picker-list">
+                <div className="folder-picker-item" onClick={() => {
+                  (async () => { await (window as any).api.moveToFolder(folderPicker.sessionId, null); await reload(); })();
+                  setFolderPicker(null);
+                }}>
+                  📂 (루트)
+                </div>
+                {renderTree(undefined, 0)}
+              </div>
+              <div className="folder-picker-actions">
+                <button onClick={() => setFolderPicker(null)}>취소</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {contextMenu && (
         <div
           className="context-menu"
@@ -493,6 +571,17 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
             }}>
               📁 파일 전송
             </div>
+          )}
+          {contextMenu.type === 'session' && folders.length > 0 && (
+            <>
+              <div className="context-menu-separator" />
+              <div className="context-menu-item" onClick={() => {
+                setFolderPicker({ sessionId: contextMenu.id });
+                setContextMenu(null);
+              }}>
+                📂 폴더로 이동...
+              </div>
+            </>
           )}
         </div>
       )}
