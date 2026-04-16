@@ -208,8 +208,6 @@ export const SearchBar: React.FC<Props> = ({ tabs, activeTab, selectedPanelId, o
               value={query}
               onChange={e => { setQuery(e.target.value); setShowHistory(false); setHistoryIdx(-1); }}
               onKeyDown={handleKeyDown}
-              onFocus={() => { if (searchHistory.length > 0) setShowHistory(true); }}
-              onBlur={() => { setTimeout(() => setShowHistory(false), 150); }}
               placeholder="검색..."
               autoComplete="off"
             />

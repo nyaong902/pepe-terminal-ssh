@@ -38,6 +38,17 @@ export type TabId = string;
 export type TabType = 'terminal' | 'fileExplorer';
 export type Tab = { id: TabId; title: string; layout: LayoutNode; type?: TabType };
 
+// 일괄전송 히스토리 (앱 실행 중 유지, 최대 50개)
+const broadcastHistory: string[] = [];
+const MAX_BROADCAST_HISTORY = 50;
+function addBroadcastHistory(text: string) {
+  if (!text.trim()) return;
+  const idx = broadcastHistory.indexOf(text);
+  if (idx !== -1) broadcastHistory.splice(idx, 1);
+  broadcastHistory.unshift(text);
+  if (broadcastHistory.length > MAX_BROADCAST_HISTORY) broadcastHistory.pop();
+}
+
 function App() {
   const [tabs, setTabs] = useState<Tab[]>(() => {
     return [{ id: 'tab-1', title: 'Workspace 1', layout: createInitialLayout('tab-1') }];
@@ -107,6 +118,8 @@ function App() {
   const [broadcastText, setBroadcastText] = useState('');
   const [broadcastAppendNewline, setBroadcastAppendNewline] = useState(true);
   const [broadcastScope, setBroadcastScope] = useState<'current' | 'visible' | 'connected'>('current');
+  const [broadcastShowHistory, setBroadcastShowHistory] = useState(false);
+  const [broadcastHistoryIdx, setBroadcastHistoryIdx] = useState(-1);
   const [, setConnectedTick] = useState(0);
   // 글로벌 연결 상태 변경시 일괄전송 카운트 등 재계산을 위해 강제 리렌더
   useEffect(() => subscribeConnectedChange(() => setConnectedTick(n => n + 1)), []);
@@ -190,6 +203,7 @@ function App() {
       text = broadcastAppendNewline ? (broadcastText.endsWith('\n') ? broadcastText : broadcastText + '\n') : broadcastText;
       label = '텍스트';
       if (!text) { flashBroadcastNotice('텍스트를 입력하세요', 'warn'); return; }
+      addBroadcastHistory(broadcastText);
     }
     const targets = collectBroadcastTargets(scope);
     if (targets.length === 0) {
@@ -1097,30 +1111,64 @@ function App() {
             <option value="visible">보이는 탭 ({collectBroadcastTargets('visible').length})</option>
             <option value="connected">연결된 세션 ({collectBroadcastTargets('connected').length})</option>
           </select>
-          <input
-            className="broadcast-input"
-            autoFocus
-            value={broadcastText}
-            onChange={e => setBroadcastText(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Escape') { setShowBroadcast(false); return; }
-              if (e.key === 'Enter') { e.preventDefault(); sendBroadcast(broadcastScope); return; }
-              // Ctrl+C / Ctrl+D 를 브로드캐스트 제어 문자로 가로챔
-              if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
-                if (e.key === 'c' || e.key === 'C') {
-                  // 텍스트가 선택된 경우는 일반 복사 동작을 허용
-                  const inp = e.currentTarget as HTMLInputElement;
-                  if (inp.selectionStart !== inp.selectionEnd) return;
-                  e.preventDefault();
-                  sendBroadcast(broadcastScope, { raw: '\x03', label: '^C' });
-                } else if (e.key === 'd' || e.key === 'D') {
-                  e.preventDefault();
-                  sendBroadcast(broadcastScope, { raw: '\x04', label: '^D' });
+          <div style={{ position: 'relative', flex: 1, display: 'flex' }}>
+            <input
+              className="broadcast-input"
+              autoFocus
+              value={broadcastText}
+              onChange={e => { setBroadcastText(e.target.value); setBroadcastShowHistory(false); }}
+              onBlur={() => setTimeout(() => setBroadcastShowHistory(false), 150)}
+              onKeyDown={e => {
+                if (e.key === 'Escape') { if (broadcastShowHistory) { setBroadcastShowHistory(false); return; } setShowBroadcast(false); return; }
+                if (e.key === 'ArrowDown' && !broadcastShowHistory) {
+                  if (broadcastHistory.length > 0) { e.preventDefault(); setBroadcastShowHistory(true); setBroadcastHistoryIdx(0); setBroadcastText(broadcastHistory[0]); }
+                  return;
                 }
-              }
-            }}
-            placeholder="전송할 텍스트 (Enter 전송, Ctrl+C/^C, Ctrl+D/^D)"
-          />
+                if (e.key === 'ArrowDown' && broadcastShowHistory) {
+                  e.preventDefault();
+                  const next = Math.min(broadcastHistoryIdx + 1, broadcastHistory.length - 1);
+                  setBroadcastHistoryIdx(next); setBroadcastText(broadcastHistory[next]);
+                  return;
+                }
+                if (e.key === 'ArrowUp' && broadcastShowHistory) {
+                  e.preventDefault();
+                  const prev = Math.max(broadcastHistoryIdx - 1, 0);
+                  setBroadcastHistoryIdx(prev); setBroadcastText(broadcastHistory[prev]);
+                  return;
+                }
+                if (e.key === 'Enter') { e.preventDefault(); setBroadcastShowHistory(false); sendBroadcast(broadcastScope); return; }
+                if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
+                  if (e.key === 'c' || e.key === 'C') {
+                    const inp = e.currentTarget as HTMLInputElement;
+                    if (inp.selectionStart !== inp.selectionEnd) return;
+                    e.preventDefault();
+                    sendBroadcast(broadcastScope, { raw: '\x03', label: '^C' });
+                  } else if (e.key === 'd' || e.key === 'D') {
+                    e.preventDefault();
+                    sendBroadcast(broadcastScope, { raw: '\x04', label: '^D' });
+                  }
+                }
+              }}
+              placeholder="전송할 텍스트 (Enter 전송, Ctrl+C/^C, Ctrl+D/^D)"
+              style={{ flex: 1, borderRadius: '4px 0 0 4px' }}
+            />
+            <button
+              className="broadcast-history-toggle"
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => { setBroadcastShowHistory(v => !v); setBroadcastHistoryIdx(-1); }}
+              title="전송 이력"
+            >▾</button>
+            {broadcastShowHistory && broadcastHistory.length > 0 && (
+              <div className="broadcast-history-dropdown">
+                {broadcastHistory.map((h, i) => (
+                  <div key={`${h}-${i}`}
+                    className={`broadcast-history-item ${i === broadcastHistoryIdx ? 'active' : ''}`}
+                    onMouseDown={e => { e.preventDefault(); setBroadcastText(h); setBroadcastShowHistory(false); }}
+                  >{h}</div>
+                ))}
+              </div>
+            )}
+          </div>
           <label className="broadcast-chk" title="끝에 개행(Enter) 추가">
             <input type="checkbox" checked={broadcastAppendNewline} onChange={e => setBroadcastAppendNewline(e.target.checked)} />
             <span>↵</span>
