@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('api', {
   saveSession: (s: any) => ipcRenderer.invoke('sessions:save', s),
   deleteSession: (id: string) => ipcRenderer.invoke('sessions:delete', id),
   moveToFolder: (sessionId: string, targetFolderId: string | null) => ipcRenderer.invoke('sessions:move-to-folder', { sessionId, targetFolderId }),
+  reorderSession: (id: string, type: 'session' | 'folder', direction: 'up' | 'down' | 'top' | 'bottom') => ipcRenderer.invoke('sessions:reorder', { id, type, direction }),
 
   // UI Prefs (config.json 에 저장 — sessionData 멀티인스턴스 분리와 무관하게 영속)
   getUIPrefs: () => ipcRenderer.invoke('ui-prefs:get'),

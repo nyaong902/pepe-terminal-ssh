@@ -267,6 +267,135 @@ ipcMain.handle('sessions:save', (_e, s: Session) => {
   return sessionsData;
 });
 
+// childOrder 헬퍼: 부모의 자식 순서 목록 가져오기 (없으면 폴더 먼저, 세션 나중 기본값 생성)
+function getChildOrder(parentId?: string): string[] {
+  const key = parentId || '__root__';
+  if (!sessionsData.childOrder) sessionsData.childOrder = {};
+  if (!sessionsData.childOrder[key]) {
+    // 기본값: 폴더 먼저, 세션 나중 (기존 동작 호환)
+    const folders = sessionsData.folders.filter(f => (f.parentId ?? undefined) === parentId).map(f => f.id);
+    const sessions = sessionsData.sessions.filter(s => (s.folderId ?? undefined) === parentId).map(s => s.id);
+    sessionsData.childOrder[key] = [...folders, ...sessions];
+  }
+  // 실제 존재하는 항목만 필터 + 누락된 항목 추가
+  const allIds = new Set([
+    ...sessionsData.folders.filter(f => (f.parentId ?? undefined) === parentId).map(f => f.id),
+    ...sessionsData.sessions.filter(s => (s.folderId ?? undefined) === parentId).map(s => s.id),
+  ]);
+  const order = sessionsData.childOrder[key].filter(id => allIds.has(id));
+  for (const aid of allIds) { if (!order.includes(aid)) order.push(aid); }
+  sessionsData.childOrder[key] = order;
+  return order;
+}
+
+function setChildOrder(parentId: string | undefined, order: string[]) {
+  if (!sessionsData.childOrder) sessionsData.childOrder = {};
+  sessionsData.childOrder[parentId || '__root__'] = order;
+}
+
+function removeFromChildOrder(parentId: string | undefined, itemId: string) {
+  const order = getChildOrder(parentId);
+  const idx = order.indexOf(itemId);
+  if (idx >= 0) order.splice(idx, 1);
+  setChildOrder(parentId, order);
+}
+
+function addToChildOrder(parentId: string | undefined, itemId: string, position: 'first' | 'last' | { before: string } | { after: string }) {
+  const order = getChildOrder(parentId);
+  // 이미 있으면 제거
+  const existIdx = order.indexOf(itemId);
+  if (existIdx >= 0) order.splice(existIdx, 1);
+  if (position === 'first') order.unshift(itemId);
+  else if (position === 'last') order.push(itemId);
+  else if ('before' in position) {
+    const ti = order.indexOf(position.before);
+    order.splice(ti >= 0 ? ti : 0, 0, itemId);
+  } else {
+    const ti = order.indexOf(position.after);
+    order.splice(ti >= 0 ? ti + 1 : order.length, 0, itemId);
+  }
+  setChildOrder(parentId, order);
+}
+
+ipcMain.handle('sessions:reorder', (_e, { id, type, direction }: { id: string; type: 'session' | 'folder'; direction: 'up' | 'down' | 'top' | 'bottom' }) => {
+  // 현재 부모 찾기
+  let parentId: string | undefined;
+  if (type === 'session') {
+    const sess = sessionsData.sessions.find(s => s.id === id);
+    if (!sess) return sessionsData;
+    parentId = sess.folderId;
+  } else {
+    const folder = sessionsData.folders.find(f => f.id === id);
+    if (!folder) return sessionsData;
+    parentId = folder.parentId;
+  }
+
+  const order = getChildOrder(parentId);
+  const idx = order.indexOf(id);
+  if (idx < 0) return sessionsData;
+
+  if (direction === 'top') {
+    // 같은 폴더 내 맨 처음
+    order.splice(idx, 1);
+    order.unshift(id);
+    setChildOrder(parentId, order);
+  } else if (direction === 'bottom') {
+    // 같은 폴더 내 맨 끝
+    order.splice(idx, 1);
+    order.push(id);
+    setChildOrder(parentId, order);
+  } else if (direction === 'up') {
+    if (idx > 0) {
+      // 위 항목과 swap
+      [order[idx], order[idx - 1]] = [order[idx - 1], order[idx]];
+      setChildOrder(parentId, order);
+    } else if (parentId) {
+      // 폴더 맨 위 → 부모 폴더로 올라감
+      removeFromChildOrder(parentId, id);
+      if (type === 'session') {
+        sessionsData.sessions.find(s => s.id === id)!.folderId = sessionsData.folders.find(f => f.id === parentId)?.parentId;
+      } else {
+        sessionsData.folders.find(f => f.id === id)!.parentId = sessionsData.folders.find(f => f.id === parentId)?.parentId;
+      }
+      const grandParentId = sessionsData.folders.find(f => f.id === parentId)?.parentId;
+      addToChildOrder(grandParentId, id, { before: parentId });
+    }
+  } else { // down
+    if (idx < order.length - 1) {
+      // 아래 항목 확인: 폴더면 진입, 아니면 swap
+      const nextId = order[idx + 1];
+      const isFolder = sessionsData.folders.some(f => f.id === nextId);
+      if (isFolder) {
+        // 다음이 폴더 → 그 폴더에 진입 (첫 번째 자식으로)
+        removeFromChildOrder(parentId, id);
+        if (type === 'session') {
+          sessionsData.sessions.find(s => s.id === id)!.folderId = nextId;
+        } else {
+          sessionsData.folders.find(f => f.id === id)!.parentId = nextId;
+        }
+        addToChildOrder(nextId, id, 'first');
+      } else {
+        // 다음이 세션 → swap
+        [order[idx], order[idx + 1]] = [order[idx + 1], order[idx]];
+        setChildOrder(parentId, order);
+      }
+    } else if (parentId) {
+      // 폴더 맨 아래 → 부모 폴더 밖으로 (부모 뒤에 배치)
+      removeFromChildOrder(parentId, id);
+      if (type === 'session') {
+        sessionsData.sessions.find(s => s.id === id)!.folderId = sessionsData.folders.find(f => f.id === parentId)?.parentId;
+      } else {
+        sessionsData.folders.find(f => f.id === id)!.parentId = sessionsData.folders.find(f => f.id === parentId)?.parentId;
+      }
+      const grandParentId = sessionsData.folders.find(f => f.id === parentId)?.parentId;
+      addToChildOrder(grandParentId, id, { after: parentId });
+    }
+  }
+
+  saveSessionsData(sessionsData);
+  return sessionsData;
+});
+
 ipcMain.handle('sessions:move-to-folder', (_e, { sessionId, targetFolderId }: { sessionId: string; targetFolderId: string | null }) => {
   const sess = sessionsData.sessions.find(s => s.id === sessionId);
   if (!sess) return sessionsData;

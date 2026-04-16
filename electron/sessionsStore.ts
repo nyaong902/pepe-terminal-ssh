@@ -35,6 +35,7 @@ export type Folder = {
 export type SessionsData = {
   folders: Folder[];
   sessions: Session[];
+  childOrder?: Record<string, string[]>; // parentId → 자식 ID 목록 (폴더+세션 혼합 순서)
 };
 
 let customSessionsPath: string | null = null;
@@ -97,7 +98,7 @@ export function loadSessionsData(): SessionsData {
     const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     // 기존 flat array 마이그레이션
     if (Array.isArray(raw)) return { folders: [], sessions: raw };
-    return { folders: raw.folders ?? [], sessions: raw.sessions ?? [] };
+    return { folders: raw.folders ?? [], sessions: raw.sessions ?? [], childOrder: raw.childOrder ?? undefined };
   } catch {
     return { folders: [], sessions: [] };
   }

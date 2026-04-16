@@ -107,11 +107,14 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
     return () => window.removeEventListener('click', close);
   }, [contextMenu]);
 
+  const [childOrder, setChildOrder] = useState<Record<string, string[]>>({});
+
   const reload = async () => {
     const data = await window.api?.listSessions?.();
     if (data && !Array.isArray(data)) {
       setSessions(data.sessions || []);
       setFolders(data.folders || []);
+      setChildOrder(data.childOrder || {});
     } else {
       setSessions(data || []);
       setFolders([]);
@@ -246,112 +249,80 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
 
   const selectedSession = selectedType === 'session' ? sessions.find(x => x.id === selectedId) : null;
 
-  // 재귀 트리 렌더링
+  // 재귀 트리 렌더링 — childOrder 기반 혼합 순서
   const renderTree = (parentId?: string, depth = 0) => {
+    const key = parentId || '__root__';
+    const order = childOrder[key];
     const childFolders = folders.filter(f => (f.parentId ?? undefined) === parentId);
     const childSessions = sessions.filter(s => (s.folderId ?? undefined) === parentId);
 
+    // childOrder가 있으면 그 순서로, 없으면 폴더 먼저 세션 나중
+    const allIds = order
+      ? [...order.filter(id => childFolders.some(f => f.id === id) || childSessions.some(s => s.id === id)),
+         ...childFolders.filter(f => !order.includes(f.id)).map(f => f.id),
+         ...childSessions.filter(s => !order.includes(s.id)).map(s => s.id)]
+      : [...childFolders.map(f => f.id), ...childSessions.map(s => s.id)];
+
     return (
       <>
-        {childFolders.map(f => {
-          const isCollapsed = collapsed.has(f.id);
-          const isSelected = selectedId === f.id && selectedType === 'folder';
-          return (
-            <React.Fragment key={f.id}>
-              <div
-                className={`session-item folder-item ${isSelected || selectedIds.has(f.id) ? 'selected' : ''} ${dragOverId === f.id ? 'drag-over' : ''}`}
+        {allIds.map(itemId => {
+          const f = childFolders.find(x => x.id === itemId);
+          if (f) {
+            const isCollapsed = collapsed.has(f.id);
+            const isSelected = selectedId === f.id && selectedType === 'folder';
+            return (
+              <React.Fragment key={f.id}>
+                <div
+                  className={`session-item folder-item ${isSelected || selectedIds.has(f.id) ? 'selected' : ''} ${dragOverId === f.id ? 'drag-over' : ''}`}
+                  style={{ paddingLeft: 8 + depth * 16 }}
+                  onClick={e => {
+                    if (e.ctrlKey || e.metaKey) {
+                      setSelectedIds(prev => { const next = new Set(prev); if (next.size === 0 && selectedId) next.add(selectedId); next.has(f.id) ? next.delete(f.id) : next.add(f.id); return next; });
+                    } else { setSelectedId(f.id); setSelectedType('folder'); setSelectedIds(new Set()); }
+                  }}
+                  onDoubleClick={() => toggleCollapse(f.id)}
+                  onContextMenu={e => { e.preventDefault(); setSelectedId(f.id); setSelectedType('folder'); setContextMenu({ x: e.clientX, y: e.clientY, id: f.id, type: 'folder', name: f.name }); }}
+                  onDragOver={e => { if (e.dataTransfer.types.includes('text/session-id')) { e.preventDefault(); e.stopPropagation(); setDragOverId(f.id); } }}
+                  onDragLeave={e => { e.stopPropagation(); setDragOverId(null); }}
+                  onDrop={e => { e.stopPropagation(); const sid = e.dataTransfer.getData('text/session-id'); if (sid) { e.preventDefault(); handleSessionDrop(sid, f.id); } setDragOverId(null); }}
+                >
+                  <span className="folder-toggle" onClick={e => { e.stopPropagation(); toggleCollapse(f.id); }}>{isCollapsed ? '▶' : '▼'}</span>
+                  <span className="folder-icon">📁</span>
+                  {renamingId === f.id ? (
+                    <input className="folder-rename-input" value={renameValue} onChange={e => setRenameValue(e.target.value)} onBlur={handleRenameSubmit} onKeyDown={e => { if (e.key === 'Enter') handleRenameSubmit(); if (e.key === 'Escape') setRenamingId(null); }} autoFocus onClick={e => e.stopPropagation()} />
+                  ) : (<span className="folder-name">{f.name}</span>)}
+                </div>
+                {!isCollapsed && renderTree(f.id, depth + 1)}
+              </React.Fragment>
+            );
+          }
+          const s = childSessions.find(x => x.id === itemId);
+          if (s) {
+            return (
+              <div key={s.id}
+                className={`session-item ${(selectedId === s.id && selectedType === 'session') || selectedIds.has(s.id) ? 'selected' : ''}`}
                 style={{ paddingLeft: 8 + depth * 16 }}
                 onClick={e => {
                   if (e.ctrlKey || e.metaKey) {
-                    setSelectedIds(prev => {
-                      const next = new Set(prev);
-                      if (next.size === 0 && selectedId) next.add(selectedId);
-                      next.has(f.id) ? next.delete(f.id) : next.add(f.id);
-                      return next;
-                    });
-                  } else {
-                    setSelectedId(f.id); setSelectedType('folder'); setSelectedIds(new Set());
-                  }
+                    setSelectedIds(prev => { const next = new Set(prev); if (next.size === 0 && selectedId) next.add(selectedId); next.has(s.id) ? next.delete(s.id) : next.add(s.id); return next; });
+                  } else { setSelectedId(s.id); setSelectedType('session'); setSelectedIds(new Set()); }
                 }}
-                onDoubleClick={() => toggleCollapse(f.id)}
-                onContextMenu={e => { e.preventDefault(); setSelectedId(f.id); setSelectedType('folder'); setContextMenu({ x: e.clientX, y: e.clientY, id: f.id, type: 'folder', name: f.name }); }}
-                onDragOver={e => { if (e.dataTransfer.types.includes('text/session-id')) { e.preventDefault(); e.stopPropagation(); setDragOverId(f.id); } }}
-                onDragLeave={e => { e.stopPropagation(); setDragOverId(null); }}
-                onDrop={e => {
-                  e.stopPropagation();
-                  const sid = e.dataTransfer.getData('text/session-id');
-                  if (sid) { e.preventDefault(); handleSessionDrop(sid, f.id); }
-                  setDragOverId(null);
-                }}
+                onDoubleClick={() => { if (renamingId !== s.id) handleConnect(s); }}
+                onContextMenu={e => { e.preventDefault(); setSelectedId(s.id); setSelectedType('session'); setContextMenu({ x: e.clientX, y: e.clientY, id: s.id, type: 'session', name: s.name }); }}
+                draggable={renamingId !== s.id}
+                onDragStart={e => { e.dataTransfer.setData('text/session-id', s.id); e.dataTransfer.effectAllowed = 'move'; const el = e.currentTarget as HTMLElement; e.dataTransfer.setDragImage(el, el.offsetWidth / 2, el.offsetHeight / 2); }}
+                onDragEnd={() => setDragOverId(null)}
               >
-                <span className="folder-toggle" onClick={e => { e.stopPropagation(); toggleCollapse(f.id); }}>
-                  {isCollapsed ? '▶' : '▼'}
-                </span>
-                <span className="folder-icon">📁</span>
-                {renamingId === f.id ? (
-                  <input
-                    className="folder-rename-input"
-                    value={renameValue}
-                    onChange={e => setRenameValue(e.target.value)}
-                    onBlur={handleRenameSubmit}
-                    onKeyDown={e => { if (e.key === 'Enter') handleRenameSubmit(); if (e.key === 'Escape') setRenamingId(null); }}
-                    autoFocus
-                    onClick={e => e.stopPropagation()}
-                  />
+                {renamingId === s.id ? (
+                  <input className="folder-rename-input" value={renameValue} onChange={e => setRenameValue(e.target.value)} onBlur={handleRenameSubmit} onKeyDown={e => { if (e.key === 'Enter') handleRenameSubmit(); if (e.key === 'Escape') setRenamingId(null); }} autoFocus onClick={e => e.stopPropagation()} />
                 ) : (
-                  <span className="folder-name">{f.name}</span>
+                  <><div className="session-item-name">{s.icon && <span className="session-icon">{s.icon}</span>}{s.name}</div><div className="session-item-host">{s.host}:{s.port}</div></>
                 )}
               </div>
-              {!isCollapsed && renderTree(f.id, depth + 1)}
-            </React.Fragment>
-          );
+            );
+          }
+          return null;
         })}
-        {childSessions.map(s => (
-          <div
-            key={s.id}
-            className={`session-item ${(selectedId === s.id && selectedType === 'session') || selectedIds.has(s.id) ? 'selected' : ''}`}
-            style={{ paddingLeft: 8 + depth * 16 }}
-            onClick={e => {
-              if (e.ctrlKey || e.metaKey) {
-                setSelectedIds(prev => {
-                  const next = new Set(prev);
-                  if (next.size === 0 && selectedId) next.add(selectedId);
-                  next.has(s.id) ? next.delete(s.id) : next.add(s.id);
-                  return next;
-                });
-              } else {
-                setSelectedId(s.id); setSelectedType('session'); setSelectedIds(new Set());
-              }
-            }}
-            onDoubleClick={() => { if (renamingId !== s.id) handleConnect(s); }}
-            onContextMenu={e => { e.preventDefault(); setSelectedId(s.id); setSelectedType('session'); setContextMenu({ x: e.clientX, y: e.clientY, id: s.id, type: 'session', name: s.name }); }}
-            draggable={renamingId !== s.id}
-            onDragStart={e => {
-              e.dataTransfer.setData('text/session-id', s.id);
-              e.dataTransfer.effectAllowed = 'move';
-              const el = e.currentTarget as HTMLElement;
-              e.dataTransfer.setDragImage(el, el.offsetWidth / 2, el.offsetHeight / 2);
-            }}
-            onDragEnd={() => setDragOverId(null)}
-          >
-            {renamingId === s.id ? (
-              <input
-                className="folder-rename-input"
-                value={renameValue}
-                onChange={e => setRenameValue(e.target.value)}
-                onBlur={handleRenameSubmit}
-                onKeyDown={e => { if (e.key === 'Enter') handleRenameSubmit(); if (e.key === 'Escape') setRenamingId(null); }}
-                autoFocus
-                onClick={e => e.stopPropagation()}
-              />
-            ) : (
-              <>
-                <div className="session-item-name">{s.icon && <span className="session-icon">{s.icon}</span>}{s.name}</div>
-                <div className="session-item-host">{s.host}:{s.port}</div>
-              </>
-            )}
-          </div>
-        ))}
       </>
     );
   };
@@ -424,6 +395,15 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
                 const s = sessions.find(x => x.id === selectedId);
                 if (s) startRename(s.id, 'session', s.name);
               }
+            }
+            // Ctrl+↑/↓: 순서 이동
+            if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowUp' && selectedId) {
+              e.preventDefault();
+              (async () => { await (window as any).api.reorderSession(selectedId, selectedType, 'up'); await reload(); })();
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowDown' && selectedId) {
+              e.preventDefault();
+              (async () => { await (window as any).api.reorderSession(selectedId, selectedType, 'down'); await reload(); })();
             }
             // Delete: 선택 항목 삭제
             if (e.key === 'Delete' && selectedId) {
@@ -572,6 +552,11 @@ export const SessionList: React.FC<Props> = ({ onConnect, onDisconnect, onFileTr
               📁 파일 전송
             </div>
           )}
+          <div className="context-menu-separator" />
+          <div className="context-menu-item" onClick={() => { (async () => { await (window as any).api.reorderSession(contextMenu.id, contextMenu.type, 'up'); await reload(); })(); setContextMenu(null); }}>↑ 위로</div>
+          <div className="context-menu-item" onClick={() => { (async () => { await (window as any).api.reorderSession(contextMenu.id, contextMenu.type, 'down'); await reload(); })(); setContextMenu(null); }}>↓ 아래로</div>
+          <div className="context-menu-item" onClick={() => { (async () => { await (window as any).api.reorderSession(contextMenu.id, contextMenu.type, 'top'); await reload(); })(); setContextMenu(null); }}>⤒ 맨 위로</div>
+          <div className="context-menu-item" onClick={() => { (async () => { await (window as any).api.reorderSession(contextMenu.id, contextMenu.type, 'bottom'); await reload(); })(); setContextMenu(null); }}>⤓ 맨 아래로</div>
           {contextMenu.type === 'session' && folders.length > 0 && (
             <>
               <div className="context-menu-separator" />
