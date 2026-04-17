@@ -37,6 +37,9 @@ function applyTermOpacity(termId: string, containerEl?: HTMLElement | null) {
   if (containerEl) {
     containerEl.style.background = opacity >= 1 ? themeBg : 'transparent';
   }
+  // 하나라도 투명한 터미널이 있으면 전체 투명 모드 CSS 클래스 토글
+  const anyTransparent = [...termOpacity.values()].some(v => v < 1);
+  document.documentElement.classList.toggle('term-transparent-active', anyTransparent);
 }
 const DEFAULT_WORD_SEPARATORS = ' ./\\()"\'-:,.;<>~!@#$%^&*|+=[]{}`~?';
 let currentWordSeparator = localStorage.getItem('terminalWordSeparator') ?? DEFAULT_WORD_SEPARATORS;
@@ -354,7 +357,9 @@ export function applyThemeToAll(themeName: string) {
     if (!termThemeCache.has(tid) || termThemeCache.get(tid) === currentThemeName) {
       termThemeCache.set(tid, themeName);
     }
-    entry.term.options.theme = { ...getThemeByName(termThemeCache.get(tid) || themeName) } as any;
+    // 투명도가 적용된 상태면 테마+투명도 함께 반영
+    const containerEl = (entry.term as any).element?.closest?.('.xterm-container') || null;
+    applyTermOpacity(tid, containerEl);
   }
 }
 
@@ -480,8 +485,9 @@ export function applyThemeToTerm(termId: string, themeName: string) {
   const entry = termStore.get(termId);
   if (!entry) return;
   termThemeCache.set(termId, themeName);
-  const theme = getThemeByName(themeName) as any;
-  entry.term.options.theme = { ...theme };
+  // 투명도가 적용된 상태면 테마+투명도 함께 반영
+  const containerEl = (entry.term as any).element?.closest?.('.xterm-container') || null;
+  applyTermOpacity(termId, containerEl);
 }
 
 export function clearHighlights(termId: string) {
