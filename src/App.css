@@ -9,6 +9,18 @@
 
 html, body {
   background: transparent !important;
+  margin: 0;
+  padding: 0;
+}
+
+/* 윈도우 전체 외곽선 (다른 앱과 구분) */
+#root::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  border: 1px solid #4a1f6e;
+  pointer-events: none;
+  z-index: 9999;
 }
 
 /* ── Search Bar ── */
