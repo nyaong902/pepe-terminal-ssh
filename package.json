@@ -2,7 +2,7 @@
   "name": "pepe-terminal-ssh",
   "productName": "PePe Terminal(SSH)",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "SSH Terminal Client",
   "author": "Claude (feat. ghjeong[prompt])",
   "type": "commonjs",
