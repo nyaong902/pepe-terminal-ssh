@@ -304,7 +304,7 @@ html, body {
   right: 0;
   height: 40px;
   -webkit-app-region: drag;
-  z-index: 1200;
+  z-index: 1500;
   background: #1a1a2e;
 }
 
@@ -352,7 +352,7 @@ html, body {
   position: relative;
   display: flex;
   align-items: center;
-  z-index: 1300;
+  z-index: 1500;
 }
 
 .hamburger-btn {
