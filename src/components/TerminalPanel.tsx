@@ -9,6 +9,7 @@ import { SearchAddon } from 'xterm-addon-search';
 import { Unicode11Addon } from 'xterm-addon-unicode11';
 import { getThemeByName } from '../utils/terminalThemes';
 import { getTerminalSettings } from '../utils/terminalSettings';
+import { matchKeybinding, isKeybindingListening } from '../utils/keybindings';
 import 'xterm/css/xterm.css';
 
 // ── 모듈 레벨: 컴포넌트 lifecycle과 독립 ──
@@ -117,13 +118,15 @@ function getOrCreateTerm(termId: string): { term: Terminal; fit: FitAddon; searc
     term.unicode.activeVersion = '11';
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
-      // Alt+1..9: 미니탭 전환 (앱 전역 핸들러로 위임)
+      // 단축키 변경 중이면 모든 키 통과
+      if (isKeybindingListening()) return true;
+      // Alt+1..9: 미니탭 전환 (앱 전역 핸들러로 위임) — 범위이므로 커스터마이즈 대상 아님
       if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && /^Digit[1-9]$/.test(e.code)) return false;
-      // Alt+Enter: 전체화면 토글 (앱 전역 핸들러)
-      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.code === 'Enter' || e.code === 'NumpadEnter')) return false;
+      // 전체화면 토글 (앱 전역 핸들러)
+      if (matchKeybinding(e, 'fullscreen')) return false;
+      // 미니탭 전환 (앱 전역 핸들러로 위임)
+      if (matchKeybinding(e, 'nextTab') || matchKeybinding(e, 'prevTab')) return false;
       if (!(e.ctrlKey || e.metaKey)) return true;
-      // Ctrl+Tab / Ctrl+Shift+Tab: 미니탭 전환 (앱 전역 핸들러로 위임)
-      if (e.code === 'Tab') return false;
       // Ctrl+L (Shift 없이): 커서 라인 위 내용을 스크롤 버퍼로 보존하며 밀어냄
       if (!e.shiftKey && e.code === 'KeyL') {
         const buf = term.buffer.active;
@@ -151,9 +154,13 @@ function getOrCreateTerm(termId: string): { term: Terminal; fit: FitAddon; searc
         }
         return false;
       }
-      // Ctrl+Shift+F/B/L/A를 터미널에서 가로채지 않고 앱으로 전달
+      // 찾기/클리어 관련 단축키를 터미널에서 가로채지 않고 앱으로 전달
+      if (matchKeybinding(e, 'find') || matchKeybinding(e, 'clearScrollback') || matchKeybinding(e, 'clearScreen') || matchKeybinding(e, 'clearAll')) return false;
+      // 세션 복제 분할 단축키도 앱으로 전달
+      if (matchKeybinding(e, 'cloneSplitH') || matchKeybinding(e, 'cloneSplitV')) return false;
+      // 연결된 세션 분할 단축키도 앱으로 전달
+      if (matchKeybinding(e, 'splitSessionH') || matchKeybinding(e, 'splitSessionV')) return false;
       if (!e.shiftKey) return true;
-      if (['KeyF', 'KeyB', 'KeyL', 'KeyA'].includes(e.code)) return false;
       return true;
     });
     // Ctrl+마우스휠로 폰트 크기 조절

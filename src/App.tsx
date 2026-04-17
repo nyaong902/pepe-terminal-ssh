@@ -11,6 +11,7 @@ import { QuickConnectBar, QuickConnectResult } from './components/QuickConnectDi
 import { StatusBar } from './components/StatusBar';
 import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect } from './components/TerminalPanel';
 import { getTerminalSettings, saveTerminalSettings, TerminalSettings } from './utils/terminalSettings';
+import { loadKeybindings, matchKeybinding, getKeybindings, DEFAULT_KEYBINDINGS, KEYBINDING_LABELS, keyEventToCombo, setKeybindingListening } from './utils/keybindings';
 import { getThemeList } from './utils/terminalThemes';
 import { SessionList } from './components/SessionList';
 import {
@@ -63,7 +64,11 @@ function App() {
   const [optFontFamily, setOptFontFamily] = useState(() => localStorage.getItem('terminalFontFamily') || '');
   const [optFontSize, setOptFontSize] = useState(() => Number(localStorage.getItem('terminalFontSize')) || 14);
   const [availableFonts, setAvailableFonts] = useState<string[]>([]);
-  const [optionsTab, setOptionsTab] = useState<'terminal' | 'session'>('terminal');
+  const [optionsTab, setOptionsTab] = useState<'terminal' | 'session' | 'keybindings'>('terminal');
+  const [keybindingsState, setKeybindingsState] = useState<Record<string, string>>({});
+  const [keybindingsDraft, setKeybindingsDraft] = useState<Record<string, string>>({});
+  const [listeningAction, setListeningAction] = useState<string | null>(null);
+  const [keybindingWarning, setKeybindingWarning] = useState<string | null>(null);
   const [sessionsPathDisplay, setSessionsPathDisplay] = useState('');
   const [contextMenuRegistered, setContextMenuRegistered] = useState(false);
   const [sftpProgress, setSftpProgress] = useState<{ filename: string; transferred: number; total: number; direction: string } | null>(null);
@@ -107,10 +112,46 @@ function App() {
         if (prefs && typeof prefs.showBroadcast === 'boolean') {
           setShowBroadcast(prefs.showBroadcast);
         }
+        if (prefs?.keybindings) {
+          loadKeybindings(prefs.keybindings);
+          setKeybindingsState(prefs.keybindings);
+        }
       } catch {}
       showBroadcastLoadedRef.current = true;
     })();
   }, []);
+  // 옵션 다이얼로그 열림 시 글로벌 플래그 동기화 (TerminalPanel에서 참조)
+  useEffect(() => { setKeybindingListening(showOptions); }, [showOptions]);
+
+  // 단축키 변경 listening 중: window capture phase에서 키 캡처
+  useEffect(() => {
+    if (!listeningAction) return;
+    const captureHandler = (ev: KeyboardEvent) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      ev.stopImmediatePropagation();
+      const combo = keyEventToCombo(ev);
+      console.log('[keybind-capture] combo:', combo);
+      if (!combo || /^(Ctrl|Alt|Shift|Meta)(\+(Ctrl|Alt|Shift|Meta))*$/.test(combo)) return; // modifier만이면 무시
+      // 중복 체크
+      const allBindings = { ...DEFAULT_KEYBINDINGS, ...keybindingsDraft };
+      const duplicate = Object.entries(allBindings).find(
+        ([id, key]) => id !== listeningAction && key === combo
+      );
+      if (duplicate) {
+        const dupLabel = KEYBINDING_LABELS[duplicate[0]] || duplicate[0];
+        setKeybindingWarning(`"${combo}"는 "${dupLabel}"에 이미 할당되어 있습니다.`);
+        setTimeout(() => setKeybindingWarning(null), 5000);
+      } else {
+        setKeybindingWarning(null);
+      }
+      setKeybindingsDraft(prev => ({ ...prev, [listeningAction!]: combo }));
+      setListeningAction(null);
+    };
+    window.addEventListener('keydown', captureHandler, true);
+    return () => window.removeEventListener('keydown', captureHandler, true);
+  }, [listeningAction, keybindingsDraft]);
+
   useEffect(() => {
     if (!showBroadcastLoadedRef.current) return;
     try { (window as any).api?.setUIPrefs?.({ showBroadcast }); } catch {}
@@ -249,8 +290,10 @@ function App() {
   // 글로벌 단축키
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      // Alt+Enter: 현재 미니탭 전체화면 토글 (창도 최대화, 해제 시 원래 상태로)
-      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.code === 'Enter' || e.code === 'NumpadEnter')) {
+      // 옵션 다이얼로그 열려있으면 글로벌 핸들러 무시
+      if (showOptions) return;
+      // 전체화면 토글 (창도 최대화, 해제 시 원래 상태로)
+      if (matchKeybinding(e, 'fullscreen')) {
         e.preventDefault();
         const tid = getActiveTermId();
         if (tid) {
@@ -275,11 +318,10 @@ function App() {
         }
         return;
       }
-      // Alt+Shift+H: 연결된 세션 선택 + 가로 분할
-      // Alt+Shift+V: 연결된 세션 선택 + 세로 분할
-      if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.code === 'KeyH' || e.code === 'KeyV') && activeTab && selectedPanelId) {
+      // 연결된 세션 선택 + 가로/세로 분할
+      if ((matchKeybinding(e, 'splitSessionH') || matchKeybinding(e, 'splitSessionV')) && activeTab && selectedPanelId) {
         e.preventDefault();
-        const dir: 'row' | 'column' = e.code === 'KeyV' ? 'row' : 'column';
+        const dir: 'row' | 'column' = matchKeybinding(e, 'splitSessionV') ? 'row' : 'column';
         const curTid = getActiveTermId();
         const connectedSessions: { sessionId: string; sessionName: string; host: string; termId: string }[] = [];
         const collectLeaves = (node: LayoutNode) => {
@@ -336,9 +378,8 @@ function App() {
         }
       }
       if (!(e.ctrlKey || e.metaKey)) return;
-      const code = e.code;
-      // Ctrl+Tab / Ctrl+Shift+Tab: 워크스페이스 내 모든 미니탭(모든 패널) 순환
-      if (code === 'Tab') {
+      // 미니탭 순환
+      if (matchKeybinding(e, 'nextTab') || matchKeybinding(e, 'prevTab')) {
         if (!activeTab) return;
         const leaves: { nodeId: string; sessions: PanelSession[]; activeIdx: number }[] = [];
         const collect = (node: LayoutNode) => {
@@ -362,7 +403,7 @@ function App() {
           curGlobal += l.sessions.length;
         }
         if (!found) curGlobal = 0;
-        const dir = e.shiftKey ? -1 : 1;
+        const dir = matchKeybinding(e, 'prevTab') ? -1 : 1;
         const nextGlobal = (curGlobal + dir + total) % total;
         // global index → 해당 leaf + 로컬 index
         let acc = 0;
@@ -379,12 +420,10 @@ function App() {
         }
         return;
       }
-      if (!e.shiftKey) return;
-      // Ctrl+Shift+H: 현재 세션 복제 + 가로 분할
-      // Ctrl+Shift+V: 현재 세션 복제 + 세로 분할
-      if ((code === 'KeyH' || code === 'KeyV') && !e.altKey && activeTab && selectedPanelId) {
+      // 현재 세션 복제 + 가로/세로 분할
+      if ((matchKeybinding(e, 'cloneSplitH') || matchKeybinding(e, 'cloneSplitV')) && activeTab && selectedPanelId) {
         e.preventDefault();
-        const dir: 'row' | 'column' = code === 'KeyV' ? 'row' : 'column';
+        const dir: 'row' | 'column' = matchKeybinding(e, 'cloneSplitV') ? 'row' : 'column';
         const tid = getActiveTermId();
         const sessInfo = tid ? getTermSessionInfo(tid) : null;
         if (sessInfo && sessInfo.sessionId) {
@@ -405,16 +444,16 @@ function App() {
         }
         return;
       }
-      if (code === 'KeyF') { e.preventDefault(); setShowSearch(prev => !prev); return; }
+      if (matchKeybinding(e, 'find')) { e.preventDefault(); setShowSearch(prev => !prev); return; }
       const termId = getActiveTermId();
       if (!termId) return;
-      if (code === 'KeyB') { e.preventDefault(); clearScrollbackInTerm(termId); }
-      else if (code === 'KeyL') { e.preventDefault(); clearScreenInTerm(termId); }
-      else if (code === 'KeyA') { e.preventDefault(); clearAllInTerm(termId); }
+      if (matchKeybinding(e, 'clearScrollback')) { e.preventDefault(); clearScrollbackInTerm(termId); }
+      else if (matchKeybinding(e, 'clearScreen')) { e.preventDefault(); clearScreenInTerm(termId); }
+      else if (matchKeybinding(e, 'clearAll')) { e.preventDefault(); clearAllInTerm(termId); }
     };
     window.addEventListener('keydown', handler, true); // capture phase
     return () => window.removeEventListener('keydown', handler, true);
-  }, [getActiveTermId]);
+  }, [getActiveTermId, showOptions]);
 
   // SFTP 진행률/완료 이벤트
   useEffect(() => {
@@ -981,6 +1020,7 @@ function App() {
           }
           setAvailableFonts(detected);
           setOptionsTab('terminal');
+          setKeybindingsDraft({ ...keybindingsState });
           try { const p = await (window as any).api.getSessionsPath(); setSessionsPathDisplay(p || ''); } catch {}
           setShowOptions(true);
         } },
@@ -989,27 +1029,25 @@ function App() {
     {
       label: '도움말',
       items: [
-        { label: '단축키 목록', action: () => alert(
-          '── 일반 ──\n' +
-          'Ctrl+Shift+F — 찾기\n' +
-          'Ctrl+Shift+L — 화면 지우기\n' +
-          'Ctrl+Shift+B — 스크롤 버퍼 지우기\n' +
-          'Ctrl+Shift+A — 모두 지우기\n' +
-          'Ctrl+L — 스크롤 맨 아래로\n' +
-          'Ctrl+마우스 휠 — 글꼴 크기 조절\n\n' +
-          '── 탭/워크스페이스 ──\n' +
-          'Alt+1~9 — 미니탭 전환\n' +
-          'Alt+Enter — 현재 미니탭 전체화면 토글\n' +
-          'Ctrl+Tab — 다음 미니탭\n' +
-          'Ctrl+Shift+Tab — 이전 미니탭\n' +
-          'F2 — 이름 변경\n' +
-          '가운데 클릭 — 탭 닫기\n\n' +
-          '── 미니탭 ──\n' +
-          '∨ 버튼 — 쉘 선택 (PowerShell, CMD, Git Bash 등)\n' +
-          '우클릭 — 이름 변경 / 세션 복제 / 닫기\n\n' +
-          '── 터미널 ──\n' +
-          '우클릭 — 복사 / 붙여넣기 / 글꼴 / 인코딩 / 화면 지우기 등'
-        )},
+        { label: '단축키 목록', action: () => {
+          const kb = getKeybindings();
+          const lines = Object.keys(KEYBINDING_LABELS).map(id => `${kb[id] || '(없음)'} — ${KEYBINDING_LABELS[id]}`);
+          alert(
+            '── 사용자 지정 단축키 ──\n' +
+            lines.join('\n') +
+            '\n\n── 고정 단축키 ──\n' +
+            'Alt+1~9 — 미니탭 전환\n' +
+            'Ctrl+L — 스크롤 맨 아래로\n' +
+            'Ctrl+마우스 휠 — 글꼴 크기 조절\n' +
+            'F2 — 이름 변경\n' +
+            '가운데 클릭 — 탭 닫기\n\n' +
+            '── 미니탭 ──\n' +
+            '∨ 버튼 — 쉘 선택 (PowerShell, CMD, Git Bash 등)\n' +
+            '우클릭 — 이름 변경 / 세션 복제 / 닫기\n\n' +
+            '── 터미널 ──\n' +
+            '우클릭 — 복사 / 붙여넣기 / 글꼴 / 인코딩 / 화면 지우기 등'
+          );
+        }},
         { separator: true, label: '' },
         { label: 'PePe Terminal(SSH) 정보', action: async () => {
           let sessPath = '';
@@ -1053,9 +1091,40 @@ function App() {
       <SessionList
         onConnect={(sid, name, panelId, sessTheme, ff, fs, sb) => handleConnectSession(sid, name, panelId, sessTheme, ff, fs, sb)}
         onMultiConnect={(sessList, mode) => {
-          if (!activeTab || !selectedPanelId || sessList.length === 0) return;
+          if (!activeTab || sessList.length === 0) return;
+          const panelId = selectedPanelId || findFirstLeafId(activeTab.layout);
+          if (!panelId) return;
           if (mode === 'minitab') {
-            for (const s of sessList) handleConnectSession(s.id, s.name, selectedPanelId, s.theme, s.fontFamily, s.fontSize, s.scrollback);
+            // 한 번의 layout 업데이트로 모든 세션을 미니탭에 추가
+            const newTermIds: string[] = [];
+            updateLayout(activeTab.id, layout => {
+              let current = layout;
+              for (const s of sessList) {
+                const result = addSessionToPanel(current, panelId, s.id, s.name);
+                newTermIds.push(result.termId);
+                current = result.layout;
+              }
+              return current;
+            });
+            // 모든 세션 동시 연결 + 테마/폰트 적용
+            setTimeout(() => {
+              for (let i = 0; i < sessList.length; i++) {
+                const s = sessList[i] as any;
+                const tid = newTermIds[i];
+                if (s.scrollback) applyScrollbackToTerm(tid, s.scrollback);
+                setTimeout(() => {
+                  if (s.theme) applyThemeToTerm(tid, s.theme);
+                  if (s.fontFamily || s.fontSize) applyFontToTerm(tid, s.fontFamily, s.fontSize);
+                }, 200);
+                registerTermSession(tid, s.id, s.name, s.host ?? '');
+                ((sessionId, termId) => {
+                  window.api?.connectSSH?.(termId, sessionId)?.then((r: string) => {
+                    if (r === 'need-password') promptPasswordAndConnect(termId, sessionId);
+                  }).catch(() => {});
+                })(s.id, tid);
+              }
+              setTimeout(() => refitAllTerms(), 200);
+            }, 50);
           } else {
             const dir: 'row' | 'column' = mode === 'split-v' ? 'row' : 'column';
             // 모든 세션의 termId를 미리 생성
@@ -1063,7 +1132,7 @@ function App() {
             // 첫 번째는 현재 패널에 세션 추가, 나머지는 분할 패널 생성 — 한 번의 layout 업데이트로 처리
             updateLayout(activeTab.id, layout => {
               // 첫 번째 세션을 현재 패널에 추가
-              const result = addSessionToPanel(layout, selectedPanelId, sessList[0].id, sessList[0].name);
+              const result = addSessionToPanel(layout, panelId, sessList[0].id, sessList[0].name);
               // 첫 번째 세션의 termId를 교체
               const replaceTermId = (node: LayoutNode): LayoutNode => {
                 if (node.type === 'leaf') {
@@ -1074,26 +1143,32 @@ function App() {
               };
               let currentLayout = replaceTermId(result.layout);
               // 나머지 세션은 분할로 추가
-              let lastPanelId = selectedPanelId;
+              let lastPanelId = panelId;
               for (let i = 1; i < sessList.length; i++) {
                 const newSess: PanelSession = { termId: newTermIds[i], sessionId: sessList[i].id, sessionName: sessList[i].name };
                 currentLayout = splitNodeWithSessions(currentLayout, lastPanelId, dir, [newSess], false);
               }
               return currentLayout;
             });
-            // 모든 세션 연결
-            for (let i = 0; i < sessList.length; i++) {
-              const s = sessList[i];
-              const tid = newTermIds[i];
-              setTimeout(async () => {
-                try {
-                  const r = await (window as any).api.connectSSH(tid, s.id);
-                  if (r === 'need-password') promptPasswordAndConnect(tid, s.id);
-                } catch {}
-                registerTermSession(tid, s.id, s.name, '');
-                if (i === sessList.length - 1) setTimeout(() => refitAllTerms(), 100);
-              }, 100 + 50 * i);
-            }
+            // 모든 세션 동시 연결 + 테마/폰트 적용
+            setTimeout(() => {
+              for (let i = 0; i < sessList.length; i++) {
+                const s = sessList[i] as any;
+                const tid = newTermIds[i];
+                if (s.scrollback) applyScrollbackToTerm(tid, s.scrollback);
+                setTimeout(() => {
+                  if (s.theme) applyThemeToTerm(tid, s.theme);
+                  if (s.fontFamily || s.fontSize) applyFontToTerm(tid, s.fontFamily, s.fontSize);
+                }, 200);
+                registerTermSession(tid, s.id, s.name, s.host ?? '');
+                ((sessionId, termId) => {
+                  window.api?.connectSSH?.(termId, sessionId)?.then((r: string) => {
+                    if (r === 'need-password') promptPasswordAndConnect(termId, sessionId);
+                  }).catch(() => {});
+                })(s.id, tid);
+              }
+              setTimeout(() => refitAllTerms(), 200);
+            }, 50);
           }
         }}
         onDisconnect={panelId => handleDisconnectSession(panelId)}
@@ -1306,6 +1381,7 @@ function App() {
             <div className="options-tabs">
               <button className={`options-tab ${optionsTab === 'terminal' ? 'active' : ''}`} onClick={() => setOptionsTab('terminal')}>터미널</button>
               <button className={`options-tab ${optionsTab === 'session' ? 'active' : ''}`} onClick={() => setOptionsTab('session')}>세션</button>
+              <button className={`options-tab ${optionsTab === 'keybindings' ? 'active' : ''}`} onClick={() => setOptionsTab('keybindings')}>단축키</button>
             </div>
 
             {optionsTab === 'terminal' && (
@@ -1447,8 +1523,42 @@ function App() {
               </div>
             )}
 
+            {optionsTab === 'keybindings' && (
+              <div className="options-content">
+                <div className="keybinding-list">
+                  {Object.keys(DEFAULT_KEYBINDINGS).map(actionId => {
+                    const draftCombo = keybindingsDraft[actionId] || DEFAULT_KEYBINDINGS[actionId];
+                    const isListening = listeningAction === actionId;
+                    return (
+                      <div className="keybinding-row" key={actionId}>
+                        <span className="keybinding-label">{KEYBINDING_LABELS[actionId] || actionId}</span>
+                        <input
+                          className={`keybinding-combo ${isListening ? 'listening' : ''}`}
+                          readOnly
+                          value={isListening ? '키를 누르세요...' : draftCombo}
+                        />
+                        <button className="keybinding-btn" onClick={() => setListeningAction(isListening ? null : actionId)}>
+                          {isListening ? '취소' : '변경'}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+                {keybindingWarning && (
+                  <div className="keybinding-warning">⚠ {keybindingWarning}</div>
+                )}
+                <div className="keybinding-reset">
+                  <button className="keybinding-btn" onClick={() => {
+                    setKeybindingsDraft({});
+                    setListeningAction(null);
+                    setKeybindingWarning(null);
+                  }}>초기화</button>
+                </div>
+              </div>
+            )}
+
             <div className="session-editor-actions">
-              <button className="btn-cancel" onClick={() => setShowOptions(false)}>취소</button>
+              <button className="btn-cancel" onClick={() => { setShowOptions(false); setListeningAction(null); }}>취소</button>
               <button className="btn-save" onClick={() => {
                 saveTerminalSettings(termSettings);
                 setWordSeparator(wordSepValue);
@@ -1460,6 +1570,11 @@ function App() {
                   setDefaultShell({ name: selShell.name, path: selShell.path });
                   (window as any).api?.setUIPrefs?.({ defaultShellName: selShell.name, defaultShellPath: selShell.path });
                 }
+                // 단축키 저장 — draft를 실제로 반영
+                setKeybindingsState(keybindingsDraft);
+                loadKeybindings(keybindingsDraft);
+                (window as any).api?.setUIPrefs?.({ keybindings: keybindingsDraft });
+                setListeningAction(null);
                 setShowOptions(false);
               }}>저장</button>
             </div>
