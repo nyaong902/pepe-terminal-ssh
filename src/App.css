@@ -517,15 +517,11 @@ html, body {
 }
 .term-transparent-active .layout-container,
 .term-transparent-active .layout-child,
-.term-transparent-active .layout-leaf,
 .term-transparent-active .layout-leaf-inner,
 .term-transparent-active .panel-terminal-area {
   background: transparent !important;
 }
-/* 투명 모드에서 leaf padding 제거 (투명 gap 방지) */
-.term-transparent-active .layout-leaf {
-  padding: 0 !important;
-}
+/* layout-leaf는 padding 1px만큼 #333 테두리 유지 (분할 구분) */
 
 .app-root {
   height: 100vh;
@@ -1529,9 +1525,9 @@ html, body {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  padding: 1px;
+  padding: 0;
   box-sizing: border-box;
-  background: #333;
+  background: transparent;
 }
 
 .layout-leaf-inner {
