@@ -517,9 +517,14 @@ html, body {
 }
 .term-transparent-active .layout-container,
 .term-transparent-active .layout-child,
+.term-transparent-active .layout-leaf,
 .term-transparent-active .layout-leaf-inner,
 .term-transparent-active .panel-terminal-area {
   background: transparent !important;
+}
+/* 투명 모드에서 leaf padding 제거 (투명 gap 방지) */
+.term-transparent-active .layout-leaf {
+  padding: 0 !important;
 }
 
 .app-root {
@@ -552,9 +557,6 @@ html, body {
   flex: 1 1 100% !important;
   max-width: 100% !important;
   max-height: 100% !important;
-}
-.app-root.term-fullscreen .layout-leaf:has(.layout-leaf-inner.selected) {
-  background: transparent !important;
 }
 .app-root.term-fullscreen .layout-root > *,
 .app-root.term-fullscreen .layout-container,
@@ -1540,13 +1542,13 @@ html, body {
   position: relative;
 }
 
-.layout-leaf:has(.layout-leaf-inner.selected) {
-  background: rgba(80, 200, 120, 0.85);
-}
-.term-transparent-active .layout-leaf:has(.layout-leaf-inner.selected) {
-  background: transparent !important;
-  border: 1px solid rgba(80, 200, 120, 0.7);
-  padding: 0;
+.layout-leaf-inner.selected::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2px solid rgba(80, 200, 120, 0.7);
+  pointer-events: none;
+  z-index: 100;
 }
 
 .layout-container {
