@@ -507,12 +507,14 @@ html, body {
 }
 
 /* ── App Layout ── */
-/* 터미널 투명도 활성 시 모든 중간 요소 배경 투명화 */
-/* 터미널 투명도 활성 시 — 터미널 영역만 투명화 (상태바/일괄전송바/탭바 유지) */
+/* 터미널 투명도 활성 시 — 터미널 영역만 투명화 */
 .term-transparent-active,
 .term-transparent-active body,
 .term-transparent-active #root,
 .term-transparent-active .app-root,
+.term-transparent-active .app-main {
+  background: transparent !important;
+}
 .term-transparent-active .layout-container,
 .term-transparent-active .layout-child,
 .term-transparent-active .layout-leaf-inner,
@@ -1479,6 +1481,10 @@ html, body {
 
 .panel-terminal-area .xterm {
   padding-left: 6px;
+  height: 100% !important;
+}
+.panel-terminal-area .xterm-screen {
+  height: 100% !important;
 }
 
 .panel-disconnected-overlay {
