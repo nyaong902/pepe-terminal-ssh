@@ -59,6 +59,10 @@ function getStartupCwd(): string | null {
 }
 let startupCwd: string | null = getStartupCwd();
 
+// 창 최대화 상태 + 복원 좌표
+let isMaximized = false;
+let savedBounds = { x: 100, y: 100, width: 1400, height: 900 };
+
 function createWindow() {
   if (app.isPackaged) Menu.setApplicationMenu(null);
   mainWindow = new BrowserWindow({
@@ -87,8 +91,34 @@ function createWindow() {
   }
 
   // 타이틀바 더블클릭 → 최대화 토글
-  mainWindow.on('maximize', () => { isMaximized = true; mainWindow?.webContents.send('window:maximized', true); });
-  mainWindow.on('unmaximize', () => { isMaximized = false; mainWindow?.webContents.send('window:maximized', false); });
+  mainWindow.on('maximize', () => {
+    console.log('[window] maximize event, bounds:', mainWindow?.getBounds());
+    isMaximized = true;
+    mainWindow?.webContents.send('window:maximized', true);
+  });
+  mainWindow.on('unmaximize', () => {
+    console.log('[window] unmaximize event, bounds:', mainWindow?.getBounds(), 'savedBounds:', savedBounds);
+    isMaximized = false;
+    // savedBounds의 위치/크기로 강제 복원 (Windows native restore 좌표 오류 방지)
+    if (mainWindow) {
+      const cur = mainWindow.getBounds();
+      if (cur.x !== savedBounds.x || cur.y !== savedBounds.y || cur.width !== savedBounds.width || cur.height !== savedBounds.height) {
+        mainWindow.setBounds(savedBounds);
+      }
+    }
+    mainWindow?.webContents.send('window:maximized', false);
+  });
+  // non-maximized 상태에서 resize/move가 멈춘 후 300ms 뒤 savedBounds 갱신 (debounce)
+  let savedBoundsTimer: NodeJS.Timeout | null = null;
+  const updateSaved = () => {
+    if (savedBoundsTimer) clearTimeout(savedBoundsTimer);
+    savedBoundsTimer = setTimeout(() => {
+      if (!mainWindow || isMaximized || mainWindow.isMaximized() || mainWindow.isFullScreen()) return;
+      savedBounds = mainWindow.getBounds();
+    }, 300);
+  };
+  mainWindow.on('resize', updateSaved);
+  mainWindow.on('move', updateSaved);
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -869,9 +899,6 @@ ipcMain.handle('sftp:list-dir', async (_e, { panelId, remotePath }: { panelId: s
 
 
 // ── 창 제어 ──
-let isMaximized = false;
-let savedBounds = { x: 100, y: 100, width: 1400, height: 900 };
-
 let dragStartPos: { x: number; y: number } | null = null;
 
 ipcMain.on('window:start-drag', (_e, { mouseX, mouseY }: any) => {
@@ -882,18 +909,17 @@ ipcMain.on('window:start-drag', (_e, { mouseX, mouseY }: any) => {
 
 ipcMain.on('window:drag-move', (_e, { mouseX, mouseY }: any) => {
   if (!mainWindow || !dragStartPos) return;
-  // 최대화 상태에서 드래그하면 자동 복원 (마우스 위치를 기준으로 복원 창 좌표 재계산)
-  if (isMaximized) {
+  // 최대화 상태에서 드래그하면 자동 복원
+  if (mainWindow.isMaximized()) {
     const restoreW = savedBounds.width;
     const restoreH = savedBounds.height;
-    // 마우스가 타이틀바의 중앙쯤(상대 위치)에 오도록 복원
     const offsetX = Math.min(dragStartPos.x, restoreW - 80);
     const newX = mouseX - offsetX;
     const newY = mouseY - Math.min(dragStartPos.y, 20);
+    mainWindow.unmaximize();
     mainWindow.setBounds({ x: newX, y: newY, width: restoreW, height: restoreH });
     dragStartPos = { x: offsetX, y: Math.min(dragStartPos.y, 20) };
     isMaximized = false;
-    mainWindow.webContents.send('window:maximized', false);
     return;
   }
   mainWindow.setPosition(mouseX - dragStartPos.x, mouseY - dragStartPos.y);
@@ -905,33 +931,17 @@ ipcMain.handle('window:minimize', () => mainWindow?.minimize());
 ipcMain.handle('window:toggle-maximize', () => {
   if (!mainWindow) return;
   dragStartPos = null;
-  const { screen: s } = require('electron');
-  if (isMaximized) {
-    // 현재 창이 위치한 디스플레이로 복원 좌표를 보정 (드래그로 다른 모니터에 옮긴 경우 대응)
-    const curBounds = mainWindow.getBounds();
-    const curDisplay = s.getDisplayMatching(curBounds);
-    const savedDisplay = s.getDisplayMatching(savedBounds);
-    let restore = { ...savedBounds };
-    if (curDisplay.id !== savedDisplay.id) {
-      const wa = curDisplay.workArea;
-      // 사이즈 유지, 위치는 현재 모니터 작업영역의 중앙으로
-      restore.width = Math.min(savedBounds.width, wa.width);
-      restore.height = Math.min(savedBounds.height, wa.height);
-      restore.x = wa.x + Math.max(0, Math.floor((wa.width - restore.width) / 2));
-      restore.y = wa.y + Math.max(0, Math.floor((wa.height - restore.height) / 2));
-    }
-    mainWindow.setBounds(restore);
+  if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize();
     isMaximized = false;
   } else {
     savedBounds = mainWindow.getBounds();
-    const currentDisplay = s.getDisplayMatching(savedBounds);
-    const wa = currentDisplay.workArea;
-    mainWindow.setBounds({ x: wa.x, y: wa.y, width: wa.width, height: wa.height });
+    mainWindow.maximize();
     isMaximized = true;
   }
   mainWindow.webContents.send('window:maximized', isMaximized);
 });
-ipcMain.handle('window:is-maximized', () => isMaximized);
+ipcMain.handle('window:is-maximized', () => !!mainWindow?.isMaximized());
 ipcMain.handle('window:close', () => mainWindow?.close());
 
 ipcMain.handle('ssh:auth-response', (_e, { panelId, responses }: { panelId: string; responses: string[] }) => {
