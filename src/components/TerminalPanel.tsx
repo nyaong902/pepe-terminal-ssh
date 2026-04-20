@@ -899,7 +899,14 @@ function cancelReconnect(termId: string) {
 
 export function focusTerm(termId: string) {
   const entry = termStore.get(termId);
-  if (entry) try { entry.term.focus(); } catch {}
+  if (!entry) return;
+  try {
+    entry.term.focus();
+    // xterm 내부 textarea를 직접 포커스 (더 확실)
+    const el = (entry.term as any).element as HTMLElement | undefined;
+    const textarea = el?.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+    if (textarea) textarea.focus();
+  } catch {}
 }
 
 /** 외부에서 termId의 연결 추적 상태를 리셋 (재연결 허용) */

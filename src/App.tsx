@@ -55,19 +55,55 @@ function App() {
     return [{ id: 'tab-1', title: 'Workspace 1', layout: createInitialLayout('tab-1') }];
   });
   const [activeTabId, setActiveTabId] = useState<TabId>('tab-1');
-  // 초기 패널 자동 선택
-  const initialPanelSelectedRef = useRef(false);
-  const [selectedPanelId, setSelectedPanelId] = useState<string | null>(null);
+  // 탭별로 선택된 패널 ID 기억
+  const [selectedPanelByTab, setSelectedPanelByTab] = useState<Record<string, string | null>>({});
+  const selectedPanelId = selectedPanelByTab[activeTabId] ?? null;
+  const setSelectedPanelId = useCallback((id: string | null) => {
+    setSelectedPanelByTab(prev => ({ ...prev, [activeTabId]: id }));
+  }, [activeTabId]);
 
-  // 앱 구동 시 초기 패널 자동 선택
+  // 앱 구동 시 + 탭 전환 시 해당 탭의 패널 자동 선택 (선택된 패널이 현재 탭에 없을 때)
   useEffect(() => {
-    if (initialPanelSelectedRef.current) return;
-    const firstTab = tabs[0];
-    if (firstTab && firstTab.layout.type === 'leaf') {
-      setSelectedPanelId(firstTab.layout.id);
-      initialPanelSelectedRef.current = true;
+    const curTab = tabs.find(t => t.id === activeTabId);
+    if (!curTab) return;
+    // 현재 selectedPanelId가 이 탭의 레이아웃 안에 있는지 확인
+    const findLeaf = (node: any, id: string | null): any => {
+      if (!id) return null;
+      if (node.type === 'leaf') return node.id === id ? node : null;
+      for (const c of node.children) { const r = findLeaf(c, id); if (r) return r; }
+      return null;
+    };
+    const inCurTab = selectedPanelId && findLeaf(curTab.layout, selectedPanelId);
+    if (inCurTab) return;
+    // 현재 탭의 첫 번째 leaf 찾기
+    const findFirstLeaf = (node: any): any => {
+      if (node.type === 'leaf') return node;
+      for (const c of node.children) { const r = findFirstLeaf(c); if (r) return r; }
+      return null;
+    };
+    const leaf = findFirstLeaf(curTab.layout);
+    if (leaf) setSelectedPanelId(leaf.id);
+  }, [activeTabId, tabs]);
+
+  // 선택된 패널 변경 시 또는 탭 전환 시 해당 패널의 활성 터미널에 포커스
+  useEffect(() => {
+    if (!selectedPanelId) return;
+    const curTab = tabs.find(t => t.id === activeTabId);
+    if (!curTab) return;
+    const findLeaf = (node: any, id: string): any => {
+      if (node.type === 'leaf') return node.id === id ? node : null;
+      for (const c of node.children) { const r = findLeaf(c, id); if (r) return r; }
+      return null;
+    };
+    const leaf = findLeaf(curTab.layout, selectedPanelId);
+    if (leaf && leaf.panel.sessions.length > 0) {
+      const tid = leaf.panel.sessions[leaf.panel.activeIdx]?.termId;
+      if (tid) {
+        // 여러 번 시도 (DOM 렌더링 타이밍 대응)
+        [50, 150, 300, 500].forEach(ms => setTimeout(() => focusTerm(tid), ms));
+      }
     }
-  }, [tabs]);
+  }, [selectedPanelId, activeTabId]);
   const [showSearch, setShowSearch] = useState(false);
   const [themeName, setThemeName] = useState(getCurrentThemeName);
   const [wordSepValue, setWordSepValue] = useState('');
