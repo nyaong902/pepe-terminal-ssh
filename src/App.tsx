@@ -55,7 +55,19 @@ function App() {
     return [{ id: 'tab-1', title: 'Workspace 1', layout: createInitialLayout('tab-1') }];
   });
   const [activeTabId, setActiveTabId] = useState<TabId>('tab-1');
+  // 초기 패널 자동 선택
+  const initialPanelSelectedRef = useRef(false);
   const [selectedPanelId, setSelectedPanelId] = useState<string | null>(null);
+
+  // 앱 구동 시 초기 패널 자동 선택
+  useEffect(() => {
+    if (initialPanelSelectedRef.current) return;
+    const firstTab = tabs[0];
+    if (firstTab && firstTab.layout.type === 'leaf') {
+      setSelectedPanelId(firstTab.layout.id);
+      initialPanelSelectedRef.current = true;
+    }
+  }, [tabs]);
   const [showSearch, setShowSearch] = useState(false);
   const [themeName, setThemeName] = useState(getCurrentThemeName);
   const [wordSepValue, setWordSepValue] = useState('');
@@ -262,6 +274,8 @@ function App() {
       } catch {}
     }
     flashBroadcastNotice(`${label} → ${targets.length}개 세션 전송`, 'ok');
+    // 전송 후 입력창 비우기 (override는 제어 문자라 제외)
+    if (!override) setBroadcastText('');
   };
 
   const handleThemeChange = (name: string) => {
@@ -474,8 +488,11 @@ function App() {
     const id = `tab-${Date.now()}`;
     const sn = shellName || defaultShell.name;
     const sp = shellPath || defaultShell.path;
-    setTabs(prev => [...prev, { id, title: `Workspace ${prev.length + 1}`, layout: createInitialLayout(id, sn, sp) }]);
+    const layout = createInitialLayout(id, sn, sp);
+    setTabs(prev => [...prev, { id, title: `Workspace ${prev.length + 1}`, layout }]);
     setActiveTabId(id);
+    // 새 워크스페이스의 루트 패널 자동 선택
+    if (layout.type === 'leaf') setSelectedPanelId(layout.id);
   };
 
   const renameTab = (id: TabId, name: string) => {
