@@ -1680,7 +1680,7 @@ html, body {
 }
 
 .session-editor {
-  width: 520px;
+  width: 560px;
   max-width: calc(100vw - 40px);
   background: #111;
   color: #eee;
@@ -1700,14 +1700,14 @@ html, body {
 
 .session-editor-grid {
   display: grid;
-  grid-template-columns: 100px 1fr;
+  grid-template-columns: 110px minmax(0, 420px);
   gap: 10px;
   align-items: center;
 }
 
 .session-editor-grid label {
   color: #aaa;
-  font-size: 13px;
+  font-size: 11px;
   text-align: right;
   padding-right: 8px;
 }
@@ -3247,18 +3247,34 @@ html, body {
   padding: 8px;
   border-radius: 4px;
   overflow-x: auto;
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 1.4;
   margin: 6px 0;
+  /* ASCII + box drawing 은 Cascadia Mono, 한글은 Gulimche 로 fallback (영문 부분 정렬 우선) */
+  font-family: 'Cascadia Mono', 'Cascadia Code', Consolas,
+               'Gulimche', '굴림체', 'MS Gothic',
+               'Courier New', monospace;
+  white-space: pre;
+  tab-size: 4;
+  -moz-tab-size: 4;
+  letter-spacing: 0;
+  font-kerning: none;
+  word-break: keep-all;
+  text-rendering: geometricPrecision;
 }
 .claude-chat-msg-content code {
   background: #0a0a0a;
   padding: 1px 4px;
   border-radius: 3px;
   font-size: 12px;
+  font-family: 'Cascadia Mono', Consolas, 'Gulimche', 'MS Gothic', 'Courier New', monospace;
 }
 .claude-chat-msg-content pre code {
   background: transparent;
   padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  white-space: pre;
 }
 .claude-chat-msg-content p {
   margin: 4px 0;
