@@ -177,6 +177,10 @@ function App() {
         if (typeof prefs?.showClaudeChat === 'boolean') {
           setShowClaudeChat(prefs.showClaudeChat);
         }
+        if (typeof prefs?.remoteTreeWidth === 'number' && prefs.remoteTreeWidth >= 160 && prefs.remoteTreeWidth <= 800) {
+          setRemoteTreeWidth(prefs.remoteTreeWidth);
+        }
+        remoteTreeWidthLoadedRef.current = true;
         claudeChatPinnedLoadedRef.current = true;
         showClaudeChatLoadedRef.current = true;
       } catch {}
@@ -225,6 +229,8 @@ function App() {
   const [broadcastShowHistory, setBroadcastShowHistory] = useState(false);
   const [broadcastHistoryIdx, setBroadcastHistoryIdx] = useState(-1);
   const [splitSessionPicker, setSplitSessionPicker] = useState<{ dir: 'row' | 'column'; sessions: { sessionId: string; sessionName: string; host: string; termId: string }[]; srcTermId?: string } | null>(null);
+  const [remoteTreeWidth, setRemoteTreeWidth] = useState<number>(240);
+  const remoteTreeWidthLoadedRef = useRef(false);
   const [showClaudeChat, setShowClaudeChat] = useState(true);
   const [claudeChatWidth, setClaudeChatWidth] = useState<number>(360);
   const [claudeChatPinned, setClaudeChatPinned] = useState<boolean>(false);
@@ -1237,7 +1243,7 @@ function App() {
           let sessPath = '';
           try { sessPath = await (window as any).api.getSessionsPath(); } catch {}
           alert(
-          'PePe Terminal(SSH) v1.0.5\n\n' +
+          'PePe Terminal(SSH) v2.0.0\n\n' +
           '만든이: Claude (feat. ghjeong[prompt])\n\n' +
           '── 터미널 기본 ──\n' +
           'SSH/SFTP 원격 접속 (비밀번호/키/Expect-Send 로그인)\n' +
@@ -1432,13 +1438,42 @@ function App() {
         const sess = leaf?.panel?.sessions[leaf.panel.activeIdx];
         if (!sess || !sess.sessionId || !isTermConnected(sess.termId)) return null;
         return (
-          <div className="remote-file-tree-container">
+          <div className="remote-file-tree-container" style={{ width: `${remoteTreeWidth}px` }}>
             <RemoteFileTree
               termId={sess.termId}
               sessionName={sess.sessionName}
               sessionId={sess.sessionId}
               onOpenFile={handleOpenRemoteFile}
               onAttachToClaude={handleAttachToClaude}
+            />
+            <div
+              className="remote-file-tree-resizer"
+              title="드래그하여 너비 조절 (더블클릭: 기본값 240)"
+              onMouseDown={e => {
+                e.preventDefault();
+                const startX = e.clientX;
+                const startWidth = remoteTreeWidth;
+                const onMove = (ev: MouseEvent) => {
+                  const dx = ev.clientX - startX;
+                  const w = Math.max(160, Math.min(800, startWidth + dx));
+                  setRemoteTreeWidth(w);
+                };
+                const onUp = () => {
+                  window.removeEventListener('mousemove', onMove);
+                  window.removeEventListener('mouseup', onUp);
+                  setRemoteTreeWidth(curW => {
+                    if (remoteTreeWidthLoadedRef.current) { try { (window as any).api?.setUIPrefs?.({ remoteTreeWidth: curW }); } catch {} }
+                    return curW;
+                  });
+                  window.dispatchEvent(new Event('resize'));
+                };
+                window.addEventListener('mousemove', onMove);
+                window.addEventListener('mouseup', onUp);
+              }}
+              onDoubleClick={() => {
+                setRemoteTreeWidth(240);
+                try { (window as any).api?.setUIPrefs?.({ remoteTreeWidth: 240 }); } catch {}
+              }}
             />
           </div>
         );
