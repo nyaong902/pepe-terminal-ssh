@@ -1203,15 +1203,33 @@ function App() {
             lines.join('\n') +
             '\n\n── 고정 단축키 ──\n' +
             'Alt+1~9 — 미니탭 전환\n' +
+            'Alt+Enter — 현재 터미널 전체화면 토글\n' +
             'Ctrl+L — 스크롤 맨 아래로\n' +
             'Ctrl+마우스 휠 — 글꼴 크기 조절\n' +
             'F2 — 이름 변경\n' +
-            '가운데 클릭 — 탭 닫기\n\n' +
+            '가운데 클릭 — 탭 닫기\n' +
+            'Ctrl+↑/↓ — 세션/폴더 순서 이동\n\n' +
             '── 미니탭 ──\n' +
             '∨ 버튼 — 쉘 선택 (PowerShell, CMD, Git Bash 등)\n' +
-            '우클릭 — 이름 변경 / 세션 복제 / 닫기\n\n' +
+            '우클릭 — 이름 변경 / 세션 복제 / 닫기\n' +
+            '휠 스크롤 — 좌우 스크롤 (‹ › 버튼)\n\n' +
             '── 터미널 ──\n' +
-            '우클릭 — 복사 / 붙여넣기 / 글꼴 / 인코딩 / 화면 지우기 등'
+            '우클릭 — 복사 / 붙여넣기 / 글꼴 / 인코딩 / 화면 지우기 등\n' +
+            '더블클릭 (세션) — 연결\n\n' +
+            '── 파일 트리 / 원격 편집 ──\n' +
+            '파일 더블클릭 — 에디터 탭에서 열기\n' +
+            '우클릭 — Claude 에 첨부 / 경로 복사\n' +
+            'Ctrl+S (에디터) — 저장\n\n' +
+            '── Claude 채팅 ──\n' +
+            '오른쪽 가장자리 🤖 Claude 영역 hover — 사이드바 펼침 (unpin 모드)\n' +
+            '📌 — 사이드바 고정/자동숨김 토글\n' +
+            '/ 버튼 — 슬래시 명령 팔레트 (↑↓ 탐색, Enter 실행, Esc 닫기)\n' +
+            'Enter (입력창) — 전송, Shift+Enter — 줄바꿈\n' +
+            '🗑 — 대화 + 컨텍스트 초기화\n\n' +
+            '── 일괄 전송 ──\n' +
+            'Enter — 텍스트 전송\n' +
+            'Ctrl+C / Ctrl+D — ^C / ^D 신호 전송\n' +
+            '↑/↓ — 히스토리 탐색'
           );
         }},
         { separator: true, label: '' },
@@ -1219,32 +1237,68 @@ function App() {
           let sessPath = '';
           try { sessPath = await (window as any).api.getSessionsPath(); } catch {}
           alert(
-          'PePe Terminal(SSH) v1.0.0\n\n' +
+          'PePe Terminal(SSH) v1.0.5\n\n' +
           '만든이: Claude (feat. ghjeong[prompt])\n\n' +
-          '── 주요 기능 ──\n' +
-          'SSH/SFTP 원격 접속\n' +
+          '── 터미널 기본 ──\n' +
+          'SSH/SFTP 원격 접속 (비밀번호/키/Expect-Send 로그인)\n' +
           '로컬 쉘 (PowerShell, CMD, Git Bash, WSL)\n' +
           '기본 쉘 설정 / 미니탭별 쉘 선택\n' +
-          '미니탭별 글꼴 실시간 변경\n' +
-          '듀얼 패널 파일 탐색기 (SFTP)\n' +
-          '다중 워크스페이스 / 분할 패널\n' +
-          '텍스트 일괄 전송 (브로드캐스트)\n' +
-          'Windows 탐색기 우클릭 "Open here" 연동\n' +
-          '찾기 (Ctrl+Shift+F) / 검색 이력\n' +
-          '테마 / 글꼴 / 인코딩 변경\n' +
-          'Expect/Send 로그인 스크립트\n' +
-          '자동 재연결 (30초)\n\n' +
+          '테마 / 글꼴 / 인코딩(utf-8/cp949/euc-kr) 변경\n' +
+          '자동 재연결 (30초)\n' +
+          '터미널 투명도 / 데스크톱 투시 / Alt+Enter 전체화면\n\n' +
+          '── 워크스페이스 / 패널 ──\n' +
+          '다중 워크스페이스 탭\n' +
+          '분할 패널 (가로/세로), 드래그 리사이즈\n' +
+          '패널별 미니탭, 탭 간 드래그앤드롭\n' +
+          '미니탭 휠 스크롤 / ‹ › 버튼\n' +
+          '탭별 선택 패널 기억 (재진입 시 자동 포커스)\n\n' +
+          '── 세션 관리 ──\n' +
+          '폴더 + 세션 혼합 정렬 (Ctrl+↑/↓ 이동)\n' +
+          '세션 가져오기/내보내기 (SecureCRT, Xshell)\n' +
+          '세션 클릭 토글 (encoding 창 열고 닫기)\n' +
+          '세션 편집 - 파일 트리 초기 경로 지정\n\n' +
+          '── 원격 파일 탐색/편집 (VS Code Remote 스타일) ──\n' +
+          '사이드바 원격 파일 트리 (SFTP)\n' +
+          'Monaco 에디터 탭 (구문강조, Ctrl+S 저장)\n' +
+          '듀얼 패널 파일 탐색기 / SFTP 드래그 전송\n' +
+          '파일 트리 우클릭 → Claude 첨부 / 경로 복사\n\n' +
+          '── Claude Code 통합 ──\n' +
+          '우측 Claude 채팅 사이드바 (핀/자동숨김, 리사이즈)\n' +
+          'WebDAV 브리지 - 원격 SSH 를 로컬 UNC 로 실시간 마운트\n' +
+          'Unix 경로 자동 UNC 번역 ( /view/... → \\\\127.0.0.1@port\\... )\n' +
+          'MCP ssh_exec - Claude 가 원격 SSH 명령 실행 (cleartool 등)\n' +
+          '모델 선택 (Opus / Sonnet / Haiku / Opus Plan)\n' +
+          '권한 모드 (편집 전 확인 / 자동 수락 / 계획 / 모두 허용)\n' +
+          'Plan 모드 + ExitPlanMode 승인 모달\n' +
+          'PreToolUse hooks 기반 툴 단위 승인 (체크박스)\n' +
+          '대화 세션 이어가기 (--resume)\n' +
+          '로컬 파일/폴더 첨부 (드래그/선택)\n' +
+          '슬래시 명령 팔레트 (Context/Model/Permission/Slash)\n' +
+          '툴 타임라인 실시간 인디케이터\n\n' +
+          '── 입력/브로드캐스트 ──\n' +
+          '텍스트 일괄 전송 (현재/보이는 탭/연결된 세션)\n' +
+          '빠른 연결 바 (host/user/password/enc 즉석 접속)\n' +
+          'Ctrl+C / Ctrl+D 브로드캐스트\n' +
+          '브로드캐스트 히스토리\n\n' +
+          '── 찾기 / 검색 ──\n' +
+          '터미널 찾기 (Ctrl+Shift+F), 이력, 하이라이트\n' +
+          '이전 / 다음 네비게이션\n\n' +
           '── 설정 (옵션) ──\n' +
           '기본 로컬 쉘 선택\n' +
-          '탐색기 우클릭 메뉴 등록/해제\n' +
-          '세션 저장 경로 변경\n\n' +
+          '탐색기 우클릭 "Open here" 등록/해제\n' +
+          '세션 저장 경로 변경\n' +
+          '단축키 커스터마이즈\n' +
+          '터미널 설정 (word separator, scrollback 등)\n\n' +
+          '── Windows 시스템 연동 ──\n' +
+          '윈도우 프레임 없음 / 투명 / 최대화-복원\n' +
+          '탐색기 "Open here" → 워크스페이스 해당 디렉토리 쉘\n\n' +
           '── 기술 스택 ──\n' +
-          'Electron + React + TypeScript\n' +
-          'xterm.js (터미널 에뮬레이터)\n' +
-          'node-pty (로컬 쉘)\n' +
-          'ssh2 (SSH 프로토콜)\n' +
-          'iconv-lite (문자 인코딩)\n' +
-          'Vite + vite-plugin-electron\n\n' +
+          'Electron + React + TypeScript + Vite\n' +
+          'xterm.js (터미널), Monaco Editor (코드 편집)\n' +
+          'node-pty (로컬 쉘), ssh2 (SSH/SFTP)\n' +
+          'webdav-server (SFTP→WebDAV 프록시)\n' +
+          'marked (Markdown), iconv-lite (인코딩)\n' +
+          'Claude Code CLI (@anthropic-ai/claude-code)\n\n' +
           '── 세션 저장 경로 ──\n' +
           (sessPath || '(알 수 없음)')
         ); } },
