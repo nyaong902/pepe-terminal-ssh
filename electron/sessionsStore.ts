@@ -24,6 +24,7 @@ export type Session = {
   fontSize?: number;
   scrollback?: number;
   icon?: string;
+  initialPath?: string; // SSH 연결 시 파일 트리 초기 경로 (없으면 홈 디렉토리)
 };
 
 export type Folder = {

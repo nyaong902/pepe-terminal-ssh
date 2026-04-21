@@ -113,7 +113,6 @@ html, body {
   cursor: pointer;
   font-size: 14px;
   padding: 2px 6px;
-  margin-left: auto;
 }
 .quick-connect-close:hover { color: #f66; }
 
@@ -573,12 +572,35 @@ html, body {
   flex: 1 !important;
 }
 
-/* 텍스트 일괄 전송 입력바가 표시될 때 하단 고정 컨텐츠에 여유 공간 확보 */
-.app-root.has-broadcast .session-sidebar-inner {
-  padding-bottom: 64px;
+/* 텍스트 일괄 전송 입력바가 표시될 때 하단 고정 컨텐츠에 여유 공간 확보 (pinned) */
+.app-root.has-broadcast .session-sidebar-inner:not(.auto-hide) {
+  padding-bottom: 64px; /* broadcast 36 + status 24 + 4 여백 */
+}
+/* auto-hide 는 sidebar 자체를 broadcast 위로 올림 */
+.app-root.has-broadcast .session-sidebar-inner.auto-hide {
+  bottom: 60px; /* status 24 + broadcast 36 */
+  padding-bottom: 2px;
+}
+.app-root.has-broadcast .session-list-scroll {
+  padding-bottom: 4px;
 }
 .app-root.has-broadcast .app-main {
   padding-bottom: 60px; /* status bar 24 + broadcast bar 36 */
+}
+
+/* Claude 사이드바가 고정 모드일 때: 메인/브로드캐스트바를 사이드바 너비만큼 줄임 */
+.app-root.has-claude-pinned .app-main {
+  margin-right: var(--claude-chat-width, 360px);
+}
+.app-root.has-claude-pinned .broadcast-bar {
+  right: var(--claude-chat-width, 360px);
+}
+/* Claude 사이드바가 자동 숨김 모드일 때: 트리거(20px) 공간만 예약 */
+.app-root.has-claude-autohide .app-main {
+  margin-right: 20px;
+}
+.app-root.has-claude-autohide .broadcast-bar {
+  right: 20px;
 }
 
 .app-main {
@@ -774,6 +796,7 @@ html, body {
   top: 40px;
   left: 22px;
   bottom: 24px;
+  padding-bottom: 2px;
   padding-top: 8px;
 }
 .app-root.has-quickconnect .session-sidebar-inner.auto-hide {
@@ -891,17 +914,18 @@ html, body {
   overflow: auto;
   flex: 1 1 auto;
   outline: none;
-  padding-bottom: 60px;
+  padding-bottom: 4px;
 }
 
 .session-item {
-  padding: 8px;
+  padding: 4px 8px;
   cursor: pointer;
   color: #ccc;
   background: transparent;
   border-radius: 4px;
-  margin-bottom: 2px;
+  margin-bottom: 1px;
   transition: background 0.12s;
+  font-size: 11px;
 }
 
 .session-item:hover {
@@ -936,7 +960,7 @@ html, body {
 
 .folder-name {
   font-weight: 600;
-  font-size: 13px;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1142,34 +1166,62 @@ html, body {
 }
 
 .session-item-name {
-  font-weight: 600;
-  font-size: 13px;
+  font-weight: 500;
+  font-size: 11px;
+  position: relative;
+}
+
+/* host:port 플로팅 툴팁 — 세션 항목 hover 시 우측에 표시 */
+.session-item-host-tooltip {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: #1a2030;
+  color: #cde;
+  font-size: 11px;
+  font-weight: normal;
+  padding: 4px 8px;
+  border: 1px solid #3a5075;
+  border-radius: 4px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+  z-index: 1500;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+.session-item:hover .session-item-host-tooltip,
+.session-item-name:hover .session-item-host-tooltip {
+  opacity: 1;
 }
 
 .session-item-host {
-  font-size: 11px;
+  font-size: 10px;
   color: #777;
-  margin-top: 2px;
+  margin-top: 1px;
 }
 
 .session-footer {
   border-top: 1px solid #333;
-  padding: 10px 6px 6px;
-  margin-top: 8px;
+  padding: 4px 6px 2px;
+  margin-top: 0;
   flex-shrink: 0;
 }
 
 .session-footer label {
   color: #aaa;
-  font-size: 12px;
-  margin-bottom: 4px;
+  font-size: 10px;
+  margin-bottom: 2px;
   display: block;
 }
 
 .session-footer select {
   width: 100%;
   box-sizing: border-box;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  padding: 2px 4px;
   background: #1a1a1a;
   color: #eee;
   border: 1px solid #333;
@@ -1184,8 +1236,8 @@ html, body {
 
 .session-footer-actions button {
   flex: 1;
-  padding: 5px 6px;
-  font-size: 12px;
+  padding: 3px 4px;
+  font-size: 11px;
 }
 
 .session-resize-handle {
@@ -2623,6 +2675,935 @@ html, body {
 
 .xterm .xterm-viewport {
   overflow-y: auto !important;
+}
+
+/* ── Remote File Tree ── */
+.remote-file-tree-container {
+  width: 240px;
+  min-width: 180px;
+  flex-shrink: 0;
+  background: #0d0f10;
+  border-right: 1px solid #333;
+  padding-top: 40px;
+  padding-bottom: 24px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.remote-file-tree {
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.remote-file-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  color: #58a6ff;
+  font-weight: 600;
+  border-bottom: 1px solid #222;
+  position: sticky;
+  top: 0;
+  background: #0d0f10;
+  z-index: 2;
+}
+.remote-file-header-actions {
+  display: flex;
+  gap: 2px;
+}
+.remote-file-action-btn {
+  background: transparent;
+  border: none;
+  color: #888;
+  font-size: 13px;
+  padding: 2px 5px;
+  cursor: pointer;
+  border-radius: 3px;
+  line-height: 1;
+}
+.remote-file-action-btn:hover {
+  background: #2a2a3e;
+  color: #fff;
+}
+.remote-file-path-bar {
+  display: flex;
+  gap: 2px;
+  padding: 4px 6px;
+  background: #111;
+  border-bottom: 1px solid #222;
+  position: sticky;
+  top: 28px;
+  z-index: 1;
+}
+.remote-file-path-input {
+  flex: 1;
+  min-width: 0;
+  background: #1a1a1a;
+  color: #eee;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-family: monospace;
+  outline: none;
+}
+.remote-file-path-input:focus {
+  border-color: #58a6ff;
+}
+.remote-file-path-go,
+.remote-file-path-up,
+.remote-file-path-home {
+  background: #222;
+  color: #ccc;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 0 6px;
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.remote-file-path-go:hover,
+.remote-file-path-up:hover,
+.remote-file-path-home:hover {
+  background: #333;
+  color: #fff;
+}
+.remote-file-list {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+.path-prompt-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 5000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.path-prompt-modal {
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 16px;
+  min-width: 400px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+.path-prompt-title {
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.path-prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #111;
+  color: #eee;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: monospace;
+  outline: none;
+  margin-bottom: 12px;
+}
+.path-prompt-input:focus {
+  border-color: #58a6ff;
+}
+.path-prompt-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.path-prompt-actions button {
+  background: #333;
+  color: #ccc;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 4px 14px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.path-prompt-actions button.primary {
+  background: #2b6b9b;
+  color: #fff;
+  border-color: #2b6b9b;
+}
+.path-prompt-actions button:hover {
+  background: #444;
+}
+.path-prompt-actions button.primary:hover {
+  background: #3a7bb0;
+}
+.remote-file-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  color: #ccc;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.remote-file-item:hover {
+  background: #1a1a2e;
+}
+.remote-file-toggle {
+  width: 12px;
+  font-size: 8px;
+  color: #888;
+  flex-shrink: 0;
+}
+.remote-file-toggle-space {
+  width: 12px;
+  flex-shrink: 0;
+}
+.remote-file-icon {
+  flex-shrink: 0;
+}
+.remote-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.remote-file-loading {
+  padding: 12px;
+  color: #888;
+  font-size: 12px;
+}
+
+/* ── File Editor ── */
+.file-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.file-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #1a1a2e;
+  border-bottom: 1px solid #333;
+  font-size: 12px;
+  color: #ccc;
+  flex-shrink: 0;
+}
+.file-editor-path {
+  flex: 1;
+  color: #888;
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-editor-dirty {
+  color: #f6a63a;
+  font-size: 14px;
+}
+.file-editor-save {
+  background: #2b6b9b;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.file-editor-save:disabled {
+  background: #333;
+  color: #777;
+  cursor: default;
+}
+.file-editor-notice {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+.file-editor-notice.ok {
+  background: rgba(80, 200, 120, 0.2);
+  color: #50c878;
+}
+.file-editor-notice.err {
+  background: rgba(224, 96, 96, 0.2);
+  color: #e06060;
+}
+.file-editor-body {
+  flex: 1;
+  min-height: 0;
+}
+.file-editor-loading,
+.file-editor-error {
+  padding: 20px;
+  color: #888;
+  font-size: 13px;
+  flex: 1;
+}
+.file-editor-error {
+  color: #e06060;
+}
+
+/* ── Claude Chat Sidebar ── */
+.claude-chat-sidebar {
+  position: fixed;
+  top: 40px;
+  bottom: 24px;
+  right: 0;
+  background: #0d0f10;
+  border-left: 1px solid #333;
+  z-index: 1300;
+  display: flex;
+  flex-direction: column;
+  min-width: 280px;
+  max-width: 1200px;
+}
+.claude-chat-sidebar-resizer {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  z-index: 1301;
+  background: transparent;
+  transition: background 0.15s;
+}
+.claude-chat-sidebar-resizer:hover,
+.claude-chat-sidebar-resizer:active {
+  background: rgba(74, 144, 226, 0.4);
+}
+
+/* auto-hide 모드 */
+.claude-chat-sidebar.auto-hide {
+  transition: transform 0.2s ease-out;
+  z-index: 1350;
+}
+.claude-chat-sidebar.auto-hide.hidden {
+  transform: translateX(100%);
+  pointer-events: none;
+}
+
+/* 오른쪽 세로 트리거 (auto-hide 모드일 때만) */
+.claude-chat-sidebar-trigger {
+  position: fixed;
+  top: 40px;
+  bottom: 24px;
+  right: 0;
+  width: 20px;
+  background: #0d0f10;
+  border-left: 1px solid #333;
+  z-index: 1340;
+  display: flex;
+  flex-direction: column;
+}
+/* 상단: hover 활성화 */
+.claude-chat-sidebar-trigger-top {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 8px 0;
+  border-bottom: 1px solid #333;
+  transition: background 0.15s;
+}
+.claude-chat-sidebar-trigger-top:hover {
+  background: #1a2030;
+}
+.claude-chat-sidebar-trigger-top:hover .claude-chat-sidebar-trigger-text {
+  color: #cff;
+}
+/* 하단: 비활성 공간 채움 */
+.claude-chat-sidebar-trigger-bottom {
+  flex: 1;
+}
+.claude-chat-sidebar-trigger-text {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  color: #888;
+  font-size: 12px;
+  user-select: none;
+  white-space: nowrap;
+}
+
+/* Claude 툴바 (입력 영역 위) */
+.claude-chat-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+.claude-chat-tool-btn {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  color: #cde;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.claude-chat-tool-btn:hover { background: #2a3a50; border-color: #4a90e2; }
+.claude-chat-cmd-wrap { position: relative; display: inline-block; }
+.claude-chat-cmd-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 4px;
+  background: #1a1a1a;
+  border: 1px solid #3a5075;
+  border-radius: 6px;
+  min-width: 340px;
+  max-width: 420px;
+  max-height: 400px;
+  display: flex;
+  flex-direction: column;
+  z-index: 1400;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  overflow: hidden;
+}
+.claude-chat-cmd-filter {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0a0f1a;
+  color: #cde;
+  border: none;
+  border-bottom: 1px solid #333;
+  padding: 8px 10px;
+  font-size: 13px;
+  outline: none;
+}
+.claude-chat-cmd-list {
+  overflow-y: auto;
+  flex: 1;
+  padding: 2px 0;
+}
+.claude-chat-cmd-section {
+  padding: 6px 10px 2px;
+  font-size: 10px;
+  color: #667;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.claude-chat-cmd-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  cursor: pointer;
+  gap: 12px;
+  font-size: 12px;
+}
+.claude-chat-cmd-item.highlight { background: #1e3a5c; }
+.claude-chat-cmd-item:hover { background: #2a3a50; }
+.claude-chat-cmd-label { color: #cde; }
+.claude-chat-cmd-desc { color: #778; font-size: 11px; }
+.claude-chat-cmd-empty { padding: 12px; color: #888; text-align: center; font-size: 12px; }
+.claude-chat-perm-select {
+  background: #0a1825;
+  color: #cde;
+  border: 1px solid #3a5075;
+  border-radius: 4px;
+  padding: 3px 4px;
+  font-size: 11px;
+  max-width: 160px;
+}
+.claude-chat-tool-approval-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  font-size: 11px;
+  color: #9ab;
+  cursor: pointer;
+  user-select: none;
+}
+.claude-chat-tool-approval-label input { cursor: pointer; }
+
+/* 핀 버튼 */
+.claude-chat-pin {
+  background: transparent;
+  border: none;
+  color: #777;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  opacity: 0.55;
+  transform: rotate(45deg);
+  transition: transform 0.15s, opacity 0.15s;
+}
+.claude-chat-pin:hover { opacity: 1; }
+.claude-chat-pin.pinned {
+  opacity: 1;
+  transform: rotate(0deg);
+  color: #ffb347;
+}
+.claude-chat-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.claude-chat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: #1a1a2e;
+  border-bottom: 1px solid #333;
+  color: #fff;
+  font-weight: 600;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.claude-chat-version {
+  font-weight: normal;
+  color: #888;
+  font-size: 11px;
+  margin-left: 6px;
+}
+.claude-chat-header-actions {
+  display: flex;
+  gap: 4px;
+}
+.claude-chat-header-actions button,
+.claude-chat-close {
+  background: transparent;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.claude-chat-header-actions button:hover,
+.claude-chat-close:hover {
+  background: #333;
+  color: #fff;
+}
+.claude-chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  font-size: 13px;
+}
+.claude-chat-empty {
+  color: #888;
+  text-align: center;
+  padding: 30px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.claude-chat-notinstalled {
+  padding: 20px;
+  color: #e0a000;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.claude-chat-notinstalled code {
+  background: #1a1a2e;
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: #58a6ff;
+}
+.claude-chat-loading {
+  padding: 20px;
+  color: #888;
+}
+.claude-chat-msg {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+.claude-chat-msg.user {
+  background: #1a2e3a;
+  margin-left: 20px;
+}
+.claude-chat-msg.assistant {
+  background: #1a1a2e;
+  margin-right: 20px;
+}
+.claude-chat-msg-role {
+  font-size: 11px;
+  color: #58a6ff;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.claude-chat-msg-content {
+  color: #ddd;
+  line-height: 1.5;
+  word-wrap: break-word;
+}
+.claude-chat-msg-content pre {
+  background: #0a0a0a;
+  padding: 8px;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 12px;
+  margin: 6px 0;
+}
+.claude-chat-msg-content code {
+  background: #0a0a0a;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.claude-chat-msg-content pre code {
+  background: transparent;
+  padding: 0;
+}
+.claude-chat-msg-content p {
+  margin: 4px 0;
+}
+.claude-chat-msg-content ul, .claude-chat-msg-content ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+.claude-chat-streaming {
+  color: #58a6ff;
+  padding: 6px 10px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid #223;
+  background: #0a1525;
+}
+.claude-chat-streaming-dots {
+  color: #58a6ff;
+  font-size: 12px;
+  letter-spacing: 2px;
+  animation: claude-chat-pulse 1.2s ease-in-out infinite;
+}
+@keyframes claude-chat-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+.claude-chat-streaming-activity { color: #cde; font-weight: 500; }
+
+/* 툴 타임라인 */
+.claude-chat-timeline {
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-top: 1px solid #222;
+  max-height: 180px;
+  overflow-y: auto;
+  background: #0a0f1a;
+}
+.claude-chat-timeline-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-family: monospace;
+  color: #9ab;
+  padding: 2px 0;
+}
+.claude-chat-timeline-item.running { color: #cde; }
+.claude-chat-timeline-item.done { color: #7a9; }
+.claude-chat-timeline-item.error { color: #e68; }
+.claude-chat-timeline-status { width: 16px; flex-shrink: 0; }
+.claude-chat-timeline-label {
+  flex-shrink: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 계획 승인 모달 */
+.claude-chat-plan-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.claude-chat-plan-modal {
+  background: #12161c;
+  border: 1px solid #3a5075;
+  border-radius: 8px;
+  width: min(640px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+.claude-chat-plan-title {
+  padding: 12px 16px;
+  border-bottom: 1px solid #2a3a50;
+  font-size: 14px;
+  color: #9cf;
+  font-weight: 600;
+}
+.claude-chat-plan-body {
+  padding: 12px 16px;
+  overflow-y: auto;
+  color: #cde;
+  font-size: 13px;
+  line-height: 1.55;
+  flex: 1;
+}
+.claude-chat-plan-body code {
+  background: #0a0f1a;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.claude-chat-plan-body pre {
+  background: #0a0f1a;
+  padding: 8px;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+.claude-chat-plan-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid #2a3a50;
+}
+.claude-chat-plan-btn {
+  padding: 6px 16px;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid;
+}
+.claude-chat-plan-btn.reject {
+  background: #2a1820;
+  border-color: #5a3040;
+  color: #e9a;
+}
+.claude-chat-plan-btn.reject:hover { background: #3a2030; }
+.claude-chat-plan-btn.approve {
+  background: #1a3a25;
+  border-color: #3a7050;
+  color: #9f8;
+}
+.claude-chat-plan-btn.approve:hover { background: #24502e; }
+
+.claude-chat-timeline-preview {
+  color: #668;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.claude-chat-input-area {
+  border-top: 1px solid #333;
+  padding: 8px;
+  flex-shrink: 0;
+}
+.claude-chat-attachments {
+  margin-bottom: 6px;
+  border: 1px solid #3a5075;
+  border-radius: 4px;
+  background: #1a2535;
+  max-height: 160px;
+  display: flex;
+  flex-direction: column;
+}
+.claude-chat-attachments.staged {
+  border-color: #4d7a3e;
+  background: #1a2a18;
+}
+
+.claude-chat-active-session {
+  background: #1a2e3a;
+  border-bottom: 1px solid #2e4a5a;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #9cf;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.claude-chat-session-select {
+  background: #0a1825;
+  color: #cde;
+  border: 1px solid #2e4a5a;
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 12px;
+  max-width: 180px;
+}
+.claude-chat-active-session-hint {
+  color: #6a8;
+  font-size: 11px;
+}
+.claude-chat-attachments-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: #9ab;
+  border-bottom: 1px solid #2a3a50;
+}
+.claude-chat-attachments-clear {
+  background: transparent;
+  border: 1px solid #3a5075;
+  color: #aab;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.claude-chat-attachments-clear:hover { background: #2a3a50; color: #fff; }
+.claude-chat-attachments-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+}
+.claude-chat-attachment {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #223044;
+  border-radius: 3px;
+  padding: 3px 6px;
+  margin-bottom: 3px;
+  font-size: 11px;
+  color: #cde;
+}
+.claude-chat-attachment-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.claude-chat-attachment-remove {
+  background: transparent;
+  border: none;
+  color: #aab;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+  line-height: 1;
+}
+.claude-chat-attachment-remove:hover { color: #fff; }
+
+/* RemoteFileTree 컨텍스트 메뉴 */
+.remote-file-ctx-menu {
+  position: fixed;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 4px 0;
+  z-index: 2000;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  min-width: 180px;
+  font-size: 13px;
+}
+.remote-file-ctx-item {
+  padding: 6px 14px;
+  color: #ddd;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.remote-file-ctx-item:hover { background: #3a5075; color: #fff; }
+.remote-file-ctx-item.claude { color: #9cf; }
+.remote-file-ctx-item.claude:hover { background: #2a4060; color: #fff; }
+
+/* Claude 첨부 진행 토스트 */
+.claude-attach-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1a2535;
+  border: 1px solid #3a5075;
+  border-radius: 6px;
+  padding: 10px 16px;
+  color: #cde;
+  font-size: 13px;
+  z-index: 2500;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  min-width: 240px;
+}
+.claude-attach-toast-msg { margin-bottom: 4px; }
+.claude-attach-toast-bar {
+  width: 100%;
+  height: 4px;
+  background: #0a1525;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.claude-attach-toast-bar-fill {
+  height: 100%;
+  background: #4a90e2;
+  transition: width 0.2s;
+}
+.claude-chat-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #1a1a1a;
+  color: #eee;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  resize: vertical;
+  min-height: 60px;
+}
+.claude-chat-input:focus {
+  border-color: #58a6ff;
+}
+.claude-chat-input:disabled {
+  opacity: 0.5;
+}
+.claude-chat-input-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+.claude-chat-btn {
+  background: #2b6b9b;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 14px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.claude-chat-btn.send:disabled {
+  background: #333;
+  color: #777;
+  cursor: default;
+}
+.claude-chat-btn.stop {
+  background: #c53030;
+}
+.file-editor-claude {
+  background: #5a3a8e;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  margin-right: 4px;
+}
+.file-editor-claude:hover {
+  background: #6a4a9e;
 }
 
 /* ── Keybinding settings ── */

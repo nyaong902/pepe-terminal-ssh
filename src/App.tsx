@@ -7,6 +7,9 @@ import type { MenuDef } from './components/MenuBar';
 import { Layout } from './components/Layout';
 import { SearchBar } from './components/SearchBar';
 import { FileExplorer } from './components/FileExplorer';
+import { FileEditor } from './components/FileEditor';
+import { RemoteFileTree } from './components/RemoteFileTree';
+import { ClaudeChat } from './components/ClaudeChat';
 import { QuickConnectBar, QuickConnectResult } from './components/QuickConnectDialog';
 import { StatusBar } from './components/StatusBar';
 import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect } from './components/TerminalPanel';
@@ -36,8 +39,8 @@ import {
 export type { LayoutNode, ContainerNode, LeafNode, Panel, PanelSession } from './utils/layoutUtils';
 
 export type TabId = string;
-export type TabType = 'terminal' | 'fileExplorer';
-export type Tab = { id: TabId; title: string; layout: LayoutNode; type?: TabType };
+export type TabType = 'terminal' | 'fileExplorer' | 'fileEditor';
+export type Tab = { id: TabId; title: string; layout: LayoutNode; type?: TabType; editor?: { termId: string; remotePath: string; fileName: string } };
 
 // 일괄전송 히스토리 (앱 실행 중 유지, 최대 50개)
 const broadcastHistory: string[] = [];
@@ -164,6 +167,18 @@ function App() {
           loadKeybindings(prefs.keybindings);
           setKeybindingsState(prefs.keybindings);
         }
+        if (typeof prefs?.claudeChatWidth === 'number' && prefs.claudeChatWidth >= 280 && prefs.claudeChatWidth <= 1200) {
+          setClaudeChatWidth(prefs.claudeChatWidth);
+        }
+        if (typeof prefs?.claudeChatPinned === 'boolean') {
+          setClaudeChatPinned(prefs.claudeChatPinned);
+          if (!prefs.claudeChatPinned) setClaudeChatVisible(false);
+        }
+        if (typeof prefs?.showClaudeChat === 'boolean') {
+          setShowClaudeChat(prefs.showClaudeChat);
+        }
+        claudeChatPinnedLoadedRef.current = true;
+        showClaudeChatLoadedRef.current = true;
       } catch {}
       showBroadcastLoadedRef.current = true;
     })();
@@ -210,6 +225,38 @@ function App() {
   const [broadcastShowHistory, setBroadcastShowHistory] = useState(false);
   const [broadcastHistoryIdx, setBroadcastHistoryIdx] = useState(-1);
   const [splitSessionPicker, setSplitSessionPicker] = useState<{ dir: 'row' | 'column'; sessions: { sessionId: string; sessionName: string; host: string; termId: string }[]; srcTermId?: string } | null>(null);
+  const [showClaudeChat, setShowClaudeChat] = useState(true);
+  const [claudeChatWidth, setClaudeChatWidth] = useState<number>(360);
+  const [claudeChatPinned, setClaudeChatPinned] = useState<boolean>(false);
+  const [claudeChatVisible, setClaudeChatVisible] = useState<boolean>(false);
+  const showClaudeChatLoadedRef = useRef(false);
+  const claudeChatPinnedLoadedRef = useRef(false);
+  const claudeChatHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!showClaudeChatLoadedRef.current) return;
+    try { (window as any).api?.setUIPrefs?.({ showClaudeChat }); } catch {}
+  }, [showClaudeChat]);
+  useEffect(() => {
+    if (!claudeChatPinnedLoadedRef.current) return;
+    try { (window as any).api?.setUIPrefs?.({ claudeChatPinned }); } catch {}
+    if (claudeChatPinned) setClaudeChatVisible(true);
+    // 레이아웃 변경 → 터미널 재측정
+    [50, 200, 500].forEach(ms => setTimeout(() => {
+      window.dispatchEvent(new Event('resize'));
+      refitAllTerms();
+    }, ms));
+  }, [claudeChatPinned]);
+  // 너비/표시 변경 시에도 터미널 리핏
+  useEffect(() => {
+    [50, 200].forEach(ms => setTimeout(() => {
+      window.dispatchEvent(new Event('resize'));
+      refitAllTerms();
+    }, ms));
+  }, [claudeChatWidth, showClaudeChat]);
+  const [claudeFileContext, setClaudeFileContext] = useState<{ fileName: string; remotePath: string; content: string }[] | null>(null);
+  // WebDAV 마운트 첨부 엔트리
+  const [claudeMountEntries, setClaudeMountEntries] = useState<{ termId: string; remotePath: string; uncPath: string; isDir: boolean }[]>([]);
+  const [claudeAttaching, setClaudeAttaching] = useState<{ message: string; progress: number; total: number } | null>(null);
   const [, setConnectedTick] = useState(0);
   // 글로벌 연결 상태 변경시 일괄전송 카운트 등 재계산을 위해 강제 리렌더
   useEffect(() => subscribeConnectedChange(() => setConnectedTick(n => n + 1)), []);
@@ -529,6 +576,72 @@ function App() {
     setActiveTabId(id);
     // 새 워크스페이스의 루트 패널 자동 선택
     if (layout.type === 'leaf') setSelectedPanelId(layout.id);
+  };
+
+  // 원격 파일을 에디터 탭에서 열기
+  const handleOpenRemoteFile = (termId: string, remotePath: string, fileName: string) => {
+    // 이미 같은 파일 열린 탭 있으면 전환
+    const existing = tabs.find(t => t.type === 'fileEditor' && t.editor?.termId === termId && t.editor?.remotePath === remotePath);
+    if (existing) { setActiveTabId(existing.id); return; }
+    const id = `editor-${Date.now()}`;
+    const layout = createInitialLayout(id);
+    setTabs(prev => [...prev, { id, title: `📝 ${fileName}`, layout, type: 'fileEditor', editor: { termId, remotePath, fileName } }]);
+    setActiveTabId(id);
+  };
+
+  // Claude 에 파일/폴더 첨부 (WebDAV 마운트 방식 - 실시간 SSH 접근)
+  const handleAttachToClaude = async (termId: string, remotePath: string, _fileName: string, isDir: boolean) => {
+    setShowClaudeChat(true);
+    setClaudeAttaching({ message: 'WebDAV 마운트 준비 중...', progress: 0, total: 1 });
+    try {
+      // 세션 라벨(표시용)
+      let sessionLabel = termId;
+      try {
+        const sess = findTermSession(termId);
+        if (sess) sessionLabel = sess.sessionName || sess.host || termId;
+      } catch {}
+
+      // 세션 등록 (한 번만 실제 등록됨 - 내부에서 중복 체크)
+      const reg: any = await (window as any).api?.claudeRegisterMount?.(termId, sessionLabel);
+      if (!reg?.success) {
+        setClaudeAttaching({ message: `마운트 실패: ${reg?.error || '알 수 없음'}`, progress: 0, total: 0 });
+        setTimeout(() => setClaudeAttaching(null), 3500);
+        return;
+      }
+
+      // UNC 경로 생성
+      const pathRes: any = await (window as any).api?.claudeGetMountPath?.(termId, remotePath);
+      if (!pathRes?.success) {
+        setClaudeAttaching({ message: `경로 변환 실패: ${pathRes?.error || '알 수 없음'}`, progress: 0, total: 0 });
+        setTimeout(() => setClaudeAttaching(null), 3500);
+        return;
+      }
+
+      setClaudeMountEntries(prev => {
+        const map = new Map(prev.map(e => [`${e.termId}:${e.remotePath}`, e]));
+        map.set(`${termId}:${remotePath}`, { termId, remotePath, uncPath: pathRes.uncPath, isDir });
+        return Array.from(map.values());
+      });
+      setClaudeAttaching({ message: `첨부 완료 (WebDAV 실시간 접근)`, progress: 1, total: 1 });
+      setTimeout(() => setClaudeAttaching(null), 2000);
+    } catch (err: any) {
+      setClaudeAttaching({ message: `첨부 실패: ${err}`, progress: 0, total: 0 });
+      setTimeout(() => setClaudeAttaching(null), 3500);
+    }
+  };
+
+  // termId → session meta 찾기 헬퍼 (sessionName/host 참조용)
+  const findTermSession = (termId: string): { sessionName?: string; host?: string } | null => {
+    for (const tab of tabs) {
+      const walk = (n: any): any => {
+        if (n.type === 'leaf' && n.termId === termId) return n;
+        if (n.children) for (const c of n.children) { const r = walk(c); if (r) return r; }
+        return null;
+      };
+      const leaf = walk(tab.layout);
+      if (leaf) return { sessionName: leaf.sessionName, host: leaf.host };
+    }
+    return null;
   };
 
   const renameTab = (id: TabId, name: string) => {
@@ -995,8 +1108,6 @@ function App() {
         { label: '새 워크스페이스', action: () => addTab() },
         { label: '워크스페이스 닫기', action: () => activeTab && closeTab(activeTab.id), disabled: tabs.length <= 1 },
         { separator: true, label: '' },
-        { label: showQuickConnect ? '빠른 연결 바 숨기기' : '빠른 연결 바 표시', action: () => setShowQuickConnect(v => !v) },
-        { separator: true, label: '' },
         { label: '세션 내보내기...', action: () => (window as any).api.exportSessions() },
         { label: '세션 가져오기...', action: async () => { const r = await (window as any).api.importSessions(); if (r) { window.dispatchEvent(new Event('sessions-reload')); showToast(r.addedCount != null ? `${r.addedCount}개 세션 가져옴 (총 ${r.totalParsed}개 중)` : '세션을 가져왔습니다.'); } } },
         { separator: true, label: '' },
@@ -1047,6 +1158,8 @@ function App() {
           setActiveTabId(id);
         }},
         { separator: true, label: '' },
+        { label: showQuickConnect ? '⚡ 빠른 연결 바 숨기기' : '⚡ 빠른 연결 바 표시', action: () => setShowQuickConnect(v => !v) },
+        { label: showClaudeChat ? '🤖 Claude 채팅 숨기기' : '🤖 Claude 채팅 표시', action: () => setShowClaudeChat(v => !v) },
         { label: showBroadcast ? '📢 텍스트 일괄 전송 바 숨기기' : '📢 텍스트 일괄 전송 바 표시', action: () => { setShowBroadcast(v => !v); } },
         { separator: true, label: '' },
         { label: '옵션...', action: async () => {
@@ -1140,7 +1253,11 @@ function App() {
   ];
 
   return (
-    <div className={`app-root${showBroadcast ? ' has-broadcast' : ''}${showQuickConnect ? ' has-quickconnect' : ''}${fullscreenTermId ? ' term-fullscreen' : ''}`} data-fs-term={fullscreenTermId || ''}>
+    <div
+      className={`app-root${showBroadcast ? ' has-broadcast' : ''}${showQuickConnect ? ' has-quickconnect' : ''}${fullscreenTermId ? ' term-fullscreen' : ''}${showClaudeChat && claudeChatPinned ? ' has-claude-pinned' : ''}${showClaudeChat && !claudeChatPinned ? ' has-claude-autohide' : ''}`}
+      data-fs-term={fullscreenTermId || ''}
+      style={{ ['--claude-chat-width' as any]: `${claudeChatWidth}px` }}
+    >
       <SessionList
         onConnect={(sid, name, panelId, sessTheme, ff, fs, sb) => handleConnectSession(sid, name, panelId, sessTheme, ff, fs, sb)}
         onMultiConnect={(sessList, mode) => {
@@ -1249,6 +1366,29 @@ function App() {
           } catch {}
         }}
       />
+      {/* 선택된 패널이 SSH 연결된 세션이면 원격 파일 트리 표시 */}
+      {(() => {
+        if (!selectedPanelId || !activeTab) return null;
+        const findLeaf = (node: any, id: string): any => {
+          if (node.type === 'leaf') return node.id === id ? node : null;
+          for (const c of node.children) { const r = findLeaf(c, id); if (r) return r; }
+          return null;
+        };
+        const leaf = findLeaf(activeTab.layout, selectedPanelId);
+        const sess = leaf?.panel?.sessions[leaf.panel.activeIdx];
+        if (!sess || !sess.sessionId || !isTermConnected(sess.termId)) return null;
+        return (
+          <div className="remote-file-tree-container">
+            <RemoteFileTree
+              termId={sess.termId}
+              sessionName={sess.sessionName}
+              sessionId={sess.sessionId}
+              onOpenFile={handleOpenRemoteFile}
+              onAttachToClaude={handleAttachToClaude}
+            />
+          </div>
+        );
+      })()}
       <div className="app-main">
         <div className="tab-bar-row">
           <MenuBar menus={menuDefs} />
@@ -1318,7 +1458,22 @@ function App() {
           </div>
         )}
 
-        {activeTab && activeTab.type !== 'fileExplorer' && (
+        {/* FileEditor 탭들 - 마운트 유지 */}
+        {tabs.filter(t => t.type === 'fileEditor' && t.editor).map(t => (
+          <div key={t.id} style={{ display: activeTab?.id === t.id ? 'flex' : 'none', flex: 1, minHeight: 0 }}>
+            <FileEditor
+              termId={t.editor!.termId}
+              remotePath={t.editor!.remotePath}
+              fileName={t.editor!.fileName}
+              onAnalyzeWithClaude={(ctx) => {
+                setClaudeFileContext([ctx]);
+                setShowClaudeChat(true);
+              }}
+            />
+          </div>
+        ))}
+
+        {activeTab && activeTab.type !== 'fileExplorer' && activeTab.type !== 'fileEditor' && (
           <Layout root={activeTab.layout}
             selectedPanelId={selectedPanelId}
             onSplit={(nodeId, dir) => splitPanel(activeTab.id, nodeId, dir)}
@@ -1341,6 +1496,7 @@ function App() {
 
       {showBroadcast && (
         <div className="broadcast-bar">
+          <button className="broadcast-close" onClick={() => setShowBroadcast(false)} title="닫기">✕</button>
           <span className="broadcast-label" title="텍스트 일괄 전송">📢</span>
           <select
             className="broadcast-scope"
@@ -1417,7 +1573,6 @@ function App() {
           <button className="broadcast-btn" onClick={() => sendBroadcast(broadcastScope)} title="텍스트 전송 (Enter)">전송</button>
           <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x03', label: '^C' })} title="Ctrl+C (SIGINT) 전송">^C</button>
           <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x04', label: '^D' })} title="Ctrl+D (EOF) 전송">^D</button>
-          <button className="broadcast-close" onClick={() => setShowBroadcast(false)} title="닫기">✕</button>
           {broadcastNotice && (
             <span className={`broadcast-notice ${broadcastNotice.kind}`}>{broadcastNotice.text}</span>
           )}
@@ -1646,6 +1801,131 @@ function App() {
           <span className="sftp-progress-pct">
             {sftpProgress.total > 0 ? Math.round(sftpProgress.transferred / sftpProgress.total * 100) : 0}%
           </span>
+        </div>
+      )}
+      {showClaudeChat && (() => {
+        // 모든 연결된 SSH 세션 수집 (panel.sessions 내의 termId 들)
+        const connectedSessions: { termId: string; label: string }[] = [];
+        const seen = new Set<string>();
+        const walk = (n: any) => {
+          if (n.type === 'leaf') {
+            const sessions = n.panel?.sessions || [];
+            for (const s of sessions) {
+              if (s.termId && !seen.has(s.termId) && isTermConnected(s.termId)) {
+                const info = getTermSessionInfo(s.termId);
+                const label = info?.sessionName || s.sessionName || info?.host || s.termId;
+                connectedSessions.push({ termId: s.termId, label });
+                seen.add(s.termId);
+              }
+            }
+          } else if (n.children) {
+            for (const c of n.children) walk(c);
+          }
+        };
+        for (const t of tabs) walk(t.layout);
+
+        // 현재 선택된 패널의 activeTermId 가 연결된 SSH 세션이면 기본 우선
+        let defaultSsh: { termId: string; label: string } | null = connectedSessions[0] || null;
+        if (selectedPanelId && activeTab) {
+          const findLeaf = (n: any, id: string): any => {
+            if (n.type === 'leaf') return n.id === id ? n : null;
+            for (const c of n.children) { const r = findLeaf(c, id); if (r) return r; }
+            return null;
+          };
+          const leaf = findLeaf(activeTab.layout, selectedPanelId);
+          if (leaf && leaf.panel) {
+            const activeTerm = leaf.panel.activeTermId || leaf.panel.sessions?.[0]?.termId;
+            if (activeTerm && isTermConnected(activeTerm)) {
+              const info = getTermSessionInfo(activeTerm);
+              const s = leaf.panel.sessions.find((x: any) => x.termId === activeTerm);
+              defaultSsh = { termId: activeTerm, label: info?.sessionName || s?.sessionName || info?.host || activeTerm };
+            }
+          }
+        }
+
+        const onEnterTrigger = () => {
+          if (claudeChatPinned) return;
+          if (claudeChatHideTimer.current) { clearTimeout(claudeChatHideTimer.current); claudeChatHideTimer.current = null; }
+          setClaudeChatVisible(true);
+        };
+        const onEnterSidebar = () => {
+          if (claudeChatPinned) return;
+          if (claudeChatHideTimer.current) { clearTimeout(claudeChatHideTimer.current); claudeChatHideTimer.current = null; }
+        };
+        const onLeaveSidebar = () => {
+          if (claudeChatPinned) return;
+          claudeChatHideTimer.current = setTimeout(() => setClaudeChatVisible(false), 500);
+        };
+        return (
+          <>
+            {!claudeChatPinned && (
+              <div className="claude-chat-sidebar-trigger">
+                <div className="claude-chat-sidebar-trigger-top" onMouseEnter={onEnterTrigger}>
+                  <span className="claude-chat-sidebar-trigger-text">🤖 Claude</span>
+                </div>
+                <div className="claude-chat-sidebar-trigger-bottom" />
+              </div>
+            )}
+            <div
+              className={`claude-chat-sidebar ${!claudeChatPinned ? 'auto-hide' : ''} ${!claudeChatPinned && !claudeChatVisible ? 'hidden' : ''}`}
+              style={{ width: `${claudeChatWidth}px` }}
+              onMouseEnter={onEnterSidebar}
+              onMouseLeave={onLeaveSidebar}
+            >
+            <div
+              className="claude-chat-sidebar-resizer"
+              title="드래그하여 너비 조절 (더블클릭: 기본값)"
+              onMouseDown={e => {
+                e.preventDefault();
+                const startX = e.clientX;
+                const startWidth = claudeChatWidth;
+                const onMove = (ev: MouseEvent) => {
+                  const dx = startX - ev.clientX;
+                  const w = Math.max(280, Math.min(1200, startWidth + dx));
+                  setClaudeChatWidth(w);
+                };
+                const onUp = () => {
+                  window.removeEventListener('mousemove', onMove);
+                  window.removeEventListener('mouseup', onUp);
+                  // 드래그 종료 시 prefs 저장
+                  setClaudeChatWidth(curW => {
+                    try { (window as any).api?.setUIPrefs?.({ claudeChatWidth: curW }); } catch {}
+                    return curW;
+                  });
+                  window.dispatchEvent(new Event('resize'));
+                };
+                window.addEventListener('mousemove', onMove);
+                window.addEventListener('mouseup', onUp);
+              }}
+              onDoubleClick={() => {
+                setClaudeChatWidth(360);
+                try { (window as any).api?.setUIPrefs?.({ claudeChatWidth: 360 }); } catch {}
+              }}
+            />
+            <ClaudeChat
+              onClose={() => setShowClaudeChat(false)}
+              pendingContext={claudeFileContext}
+              onContextConsumed={() => setClaudeFileContext(null)}
+              mountEntries={claudeMountEntries}
+              onClearMounted={() => setClaudeMountEntries([])}
+              onRemoveMountedEntry={(rp, termId) => setClaudeMountEntries(prev => prev.filter(e => !(e.remotePath === rp && e.termId === termId)))}
+              connectedSessions={connectedSessions}
+              defaultSshSession={defaultSsh}
+              pinned={claudeChatPinned}
+              onTogglePin={() => setClaudeChatPinned(p => !p)}
+            />
+            </div>
+          </>
+        );
+      })()}
+      {claudeAttaching && (
+        <div className="claude-attach-toast">
+          <div className="claude-attach-toast-msg">🤖 {claudeAttaching.message}</div>
+          {claudeAttaching.total > 0 && (
+            <div className="claude-attach-toast-bar">
+              <div className="claude-attach-toast-bar-fill" style={{ width: `${Math.min(100, (claudeAttaching.progress / claudeAttaching.total) * 100)}%` }} />
+            </div>
+          )}
         </div>
       )}
       {splitSessionPicker && (
