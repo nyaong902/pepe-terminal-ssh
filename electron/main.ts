@@ -8,6 +8,12 @@ import * as pty from 'node-pty';
 import { fileURLToPath } from 'url';
 import { loadSessionsData, saveSessionsData, getSessionsPath, saveCustomPath, loadUIPrefs, saveUIPrefs, Session, Folder, SessionsData } from './sessionsStore';
 import { getSSHBridge } from './sshBridge';
+import { createWebDAVBridge } from './webdavBridge';
+// MCP 서버 스크립트를 번들에 임베드 (vite ?raw) — 런타임에 임시 파일로 추출 후 spawn
+// @ts-ignore
+import mcpSshServerScript from './mcpSshServer.cjs?raw';
+// @ts-ignore
+import claudeHookScript from './claudeHookScript.cjs?raw';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -896,6 +902,50 @@ ipcMain.handle('sftp:list-dir', async (_e, { panelId, remotePath }: { panelId: s
   }
 });
 
+ipcMain.handle('sftp:read-file', async (_e, { panelId, remotePath, encoding }: { panelId: string; remotePath: string; encoding?: string }) => {
+  try {
+    const bridge = getSSHBridge();
+    const buf = await bridge.handleSFTPReadFile(panelId, remotePath);
+    const iconv = require('iconv-lite');
+    const enc = (encoding || 'utf-8').toLowerCase();
+    let text: string;
+    try {
+      if (enc === 'utf-8' || enc === 'utf8') {
+        text = buf.toString('utf-8');
+      } else if (iconv.encodingExists(enc)) {
+        text = iconv.decode(buf, enc);
+      } else {
+        text = buf.toString('utf-8');
+      }
+    } catch {
+      text = buf.toString('utf-8');
+    }
+    return { success: true, text, size: buf.length };
+  } catch (err: any) {
+    return { success: false, error: String(err) };
+  }
+});
+
+ipcMain.handle('sftp:write-file', async (_e, { panelId, remotePath, content, encoding }: { panelId: string; remotePath: string; content: string; encoding?: string }) => {
+  try {
+    const bridge = getSSHBridge();
+    const iconv = require('iconv-lite');
+    const enc = (encoding || 'utf-8').toLowerCase();
+    let buf: Buffer;
+    if (enc === 'utf-8' || enc === 'utf8') {
+      buf = Buffer.from(content, 'utf-8');
+    } else if (iconv.encodingExists(enc)) {
+      buf = iconv.encode(content, enc);
+    } else {
+      buf = Buffer.from(content, 'utf-8');
+    }
+    await bridge.handleSFTPWriteFile(panelId, remotePath, buf);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: String(err) };
+  }
+});
+
 
 
 // ── 창 제어 ──
@@ -1010,6 +1060,9 @@ ipcMain.on('ssh:input', (_e, { panelId, data, b64 }) => {
 
 ipcMain.on('ssh:disconnect', (_e, { panelId }) => {
   getSSHBridge().handleDisconnect(panelId);
+  if (webdavBridge) {
+    try { webdavBridge.unregisterSession(panelId); } catch {}
+  }
 });
 
 ipcMain.on('ssh:resize', (_e, { panelId, cols, rows }) => {
@@ -1092,4 +1145,338 @@ ipcMain.on('pty:resize', (_e, { panelId, cols, rows }: { panelId: string; cols: 
 ipcMain.on('pty:kill', (_e, { panelId }: { panelId: string }) => {
   const proc = ptyProcesses.get(panelId);
   if (proc) { proc.kill(); ptyProcesses.delete(panelId); }
+});
+
+// ── Claude Code CLI 연동 ──
+const claudeProcesses: Map<string, any> = new Map();
+
+ipcMain.handle('claude:check', async () => {
+  try {
+    const { spawn } = require('child_process');
+    return await new Promise<{ installed: boolean; version?: string }>(resolve => {
+      const proc = spawn('claude', ['--version'], { shell: true });
+      let output = '';
+      proc.stdout?.on('data', (d: Buffer) => { output += d.toString(); });
+      proc.on('error', () => resolve({ installed: false }));
+      proc.on('close', (code: number) => {
+        if (code === 0) resolve({ installed: true, version: output.trim() });
+        else resolve({ installed: false });
+      });
+    });
+  } catch {
+    return { installed: false };
+  }
+});
+
+// ── MCP/Hook 공용 Control TCP 서버 ──
+let mcpControlPort = 0;
+let mcpControlToken = '';
+// hook-approve pending: 렌더러로 요청 보내고 응답 받아올 때까지 sock 보관
+const pendingApprovals = new Map<string, { sock: any; reqId: any }>();
+(globalThis as any).__pepePendingApprovals = pendingApprovals;
+
+const startMcpControl = async (): Promise<void> => {
+  if (mcpControlPort) return;
+  const net = require('net');
+  const crypto = require('crypto');
+  mcpControlToken = crypto.randomBytes(16).toString('hex');
+  await new Promise<void>((resolve) => {
+    const srv = net.createServer((sock: any) => {
+      let buf = '';
+      sock.on('data', (d: Buffer) => {
+        buf += d.toString('utf-8');
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          if (!line.trim()) continue;
+          (async () => {
+            try {
+              const req = JSON.parse(line);
+              if (req.token !== mcpControlToken) {
+                sock.write(JSON.stringify({ id: req.id, error: 'invalid token' }) + '\n');
+                return;
+              }
+              if (req.op === 'exec') {
+                const bridge = getSSHBridge();
+                const result = await bridge.handleExec(req.termId, req.command, req.timeoutMs || 60000);
+                sock.write(JSON.stringify({ id: req.id, result }) + '\n');
+              } else if (req.op === 'hook-approve') {
+                // 승인 요청을 렌더러로 전달. 응답은 ipcMain.handle('claude:hook-respond') 에서 처리
+                const approvalId = `app-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                pendingApprovals.set(approvalId, { sock, reqId: req.id });
+                mainWindow?.webContents.send('claude:hook-approval-request', {
+                  approvalId,
+                  toolName: req.toolName,
+                  toolInput: req.toolInput,
+                  sessionId: req.sessionId,
+                });
+              } else {
+                sock.write(JSON.stringify({ id: req.id, error: 'unknown op' }) + '\n');
+              }
+            } catch (err: any) {
+              try { sock.write(JSON.stringify({ id: null, error: String(err) }) + '\n'); } catch {}
+            }
+          })();
+        }
+      });
+      sock.on('error', () => {});
+    });
+    srv.listen(0, '127.0.0.1', () => {
+      mcpControlPort = srv.address().port;
+      console.log(`[mcp-control] listening on 127.0.0.1:${mcpControlPort}`);
+      resolve();
+    });
+  });
+};
+
+// 렌더러에서 승인/거부 결과 수신
+ipcMain.handle('claude:hook-respond', (_e, { approvalId, decision, reason }: { approvalId: string; decision: 'allow' | 'deny'; reason?: string }) => {
+  const pending = pendingApprovals.get(approvalId);
+  if (!pending) return { success: false, error: 'no pending approval' };
+  pendingApprovals.delete(approvalId);
+  try {
+    pending.sock.write(JSON.stringify({ id: pending.reqId, result: decision, reason: reason || '' }) + '\n');
+  } catch {}
+  return { success: true };
+});
+
+// ── WebDAV 브리지: 원격 SSH 를 로컬 UNC 경로로 마운트 ──
+let webdavBridge: any = null;
+const getWebDAVBridge = () => {
+  if (!webdavBridge) {
+    webdavBridge = createWebDAVBridge(getSSHBridge());
+  }
+  return webdavBridge;
+};
+
+ipcMain.handle('claude:register-mount', async (_e, { panelId, sessionLabel }: { panelId: string; sessionLabel: string }) => {
+  try {
+    const bridge = getWebDAVBridge();
+    await bridge.ensureStarted();
+    bridge.registerSession(panelId, sessionLabel);
+    return { success: true, mountRoot: bridge.getMountRoot(panelId), port: bridge.getPort() };
+  } catch (err: any) {
+    console.error('[claude:register-mount] error:', err);
+    return { success: false, error: String(err) };
+  }
+});
+
+ipcMain.handle('claude:unregister-mount', async (_e, { panelId }: { panelId: string }) => {
+  try {
+    if (webdavBridge) webdavBridge.unregisterSession(panelId);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: String(err) };
+  }
+});
+
+ipcMain.handle('claude:get-mount-path', async (_e, { panelId, remotePath }: { panelId: string; remotePath: string }) => {
+  try {
+    const bridge = getWebDAVBridge();
+    if (!bridge.hasSession(panelId)) return { success: false, error: '세션이 등록되지 않음' };
+    return { success: true, uncPath: bridge.toUncPath(panelId, remotePath), httpUrl: bridge.toHttpUrl(panelId, remotePath) };
+  } catch (err: any) {
+    return { success: false, error: String(err) };
+  }
+});
+
+// claude CLI 실행 + 스트리밍 응답 (print 모드)
+ipcMain.handle('claude:send', async (_e, { sessionId, prompt, addDirs, disallowBash, sshTermId, resumeSessionId, permissionMode, model, perToolApproval }: { sessionId: string; prompt: string; addDirs?: string[]; disallowBash?: boolean; sshTermId?: string; resumeSessionId?: string | null; permissionMode?: string; model?: string; perToolApproval?: boolean }) => {
+  try {
+    const { spawn } = require('child_process');
+    const os = require('os');
+    const path = require('path');
+    const fs = require('fs');
+    console.log('[claude] spawn start, prompt length:', prompt.length);
+
+    const isWin = process.platform === 'win32';
+
+    // 긴 프롬프트는 임시 파일로 → shell 파이프로 stdin 주입 (Windows .cmd 스크립트에서 node spawn stdin 이 안먹히는 문제 회피)
+    const tmpFile = path.join(os.tmpdir(), `claude-prompt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`);
+    fs.writeFileSync(tmpFile, prompt, 'utf-8');
+
+    // npm global bin 을 PATH 에 보강 (Electron 실행 환경에서 누락될 수 있음)
+    const extraPaths: string[] = [];
+    if (isWin) {
+      if (process.env.APPDATA) extraPaths.push(path.join(process.env.APPDATA, 'npm'));
+      if (process.env.USERPROFILE) extraPaths.push(path.join(process.env.USERPROFILE, 'AppData', 'Roaming', 'npm'));
+      if (process.env.ProgramFiles) extraPaths.push(path.join(process.env.ProgramFiles, 'nodejs'));
+    } else {
+      extraPaths.push('/usr/local/bin', '/opt/homebrew/bin', path.join(os.homedir(), '.npm-global', 'bin'), path.join(os.homedir(), '.nvm', 'versions'));
+    }
+    const sep = isWin ? ';' : ':';
+    const augmentedPath = [process.env.PATH || '', ...extraPaths].filter(Boolean).join(sep);
+    const spawnEnv = {
+      ...process.env,
+      PATH: augmentedPath,
+      Path: augmentedPath,
+      // UTF-8 강제 (한글 깨짐 방지)
+      PYTHONIOENCODING: 'utf-8',
+      LANG: process.env.LANG || 'en_US.UTF-8',
+      LC_ALL: process.env.LC_ALL || 'en_US.UTF-8',
+    };
+
+    // --add-dir 옵션으로 스테이징된 디렉토리를 작업 범위에 추가
+    const addDirArgs = (addDirs && addDirs.length > 0)
+      ? addDirs.map(d => `--add-dir "${d.replace(/"/g, '\\"')}"`).join(' ')
+      : '';
+    console.log('[claude] addDirs:', addDirs);
+
+    // 권한 모드: bypassPermissions=모두허용 / acceptEdits=편집만자동 / plan=계획만 / default=요청시
+    // -p (print) 모드는 인터랙티브 불가 → 대부분 bypassPermissions 가 안전
+    let permFlag: string;
+    if (permissionMode === 'plan') permFlag = '--permission-mode plan';
+    else if (permissionMode === 'acceptEdits') permFlag = '--permission-mode acceptEdits';
+    else if (permissionMode === 'default') permFlag = '--permission-mode default';
+    else permFlag = '--dangerously-skip-permissions'; // bypassPermissions (기본)
+    // MCP 서버 설정 (원격 SSH 명령 실행용) — sshTermId 가 있을 때만 활성화
+    let mcpConfigArg = '';
+    let mcpCfgTmp = '';
+    let mcpLogPath = '';
+    if (sshTermId) {
+      await startMcpControl();
+      // 임베드된 스크립트를 임시 파일로 추출 (dev/prod 모두 작동)
+      const mcpScriptPath = path.join(os.tmpdir(), 'pepe-mcp-ssh-server.cjs');
+      try {
+        const existing = fs.existsSync(mcpScriptPath) ? fs.readFileSync(mcpScriptPath, 'utf-8') : '';
+        if (existing !== mcpSshServerScript) {
+          fs.writeFileSync(mcpScriptPath, mcpSshServerScript, 'utf-8');
+        }
+      } catch (err) {
+        console.error('[claude] MCP script extract failed:', err);
+      }
+      mcpLogPath = path.join(os.tmpdir(), `pepe-mcp-${Date.now()}.log`);
+      const mcpCfg = {
+        mcpServers: {
+          pepe_ssh: {
+            command: process.execPath,
+            args: [mcpScriptPath],
+            env: {
+              PEPE_CTRL_PORT: String(mcpControlPort),
+              PEPE_CTRL_TOKEN: mcpControlToken,
+              PEPE_TERM_ID: sshTermId,
+              PEPE_LOG_PATH: mcpLogPath,
+              ELECTRON_RUN_AS_NODE: '1',
+            },
+          },
+        },
+      };
+      mcpCfgTmp = path.join(os.tmpdir(), `claude-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`);
+      fs.writeFileSync(mcpCfgTmp, JSON.stringify(mcpCfg), 'utf-8');
+      mcpConfigArg = `--mcp-config "${mcpCfgTmp}"`;
+      console.log('[claude] MCP config written:', mcpCfgTmp, 'termId:', sshTermId, 'scriptExists:', fs.existsSync(mcpScriptPath), 'path:', mcpScriptPath);
+    }
+
+    // SSH 컨텍스트: 로컬 Bash 금지 (Unix 경로 접근 불가) — Read/Edit/Grep/Glob/LS + MCP ssh_exec 허용
+    // 파일 편집은 WebDAV UNC 경로로 Edit/Write → SFTP 프록시로 원격 반영
+    // 원격 명령 실행은 mcp__pepe_ssh__ssh_exec (MCP 서버 경유)
+    const mcpToolAllow = sshTermId ? `"mcp__pepe_ssh__ssh_exec"` : '';
+    const allowedFlag = disallowBash
+      ? `--allowedTools "Read" "Edit" "Write" "Glob" "Grep" "LS" ${mcpToolAllow} "WebFetch" "WebSearch"`
+      : '';
+
+    // 이전 대화 세션 이어가기 (--resume <session_id>)
+    const resumeFlag = resumeSessionId ? `--resume "${resumeSessionId}"` : '';
+    console.log('[claude] resume:', resumeSessionId || '(new)');
+
+    // 모델 선택 (--model)
+    const modelFlag = (model && model !== 'default') ? `--model ${model}` : '';
+    console.log('[claude] model:', model || 'default');
+
+    // 툴 단위 승인 (hooks) — perToolApproval true 일 때만 활성화
+    let settingsFlag = '';
+    let settingsTmp = '';
+    let hookScriptPath = '';
+    if (perToolApproval) {
+      await startMcpControl();
+      hookScriptPath = path.join(os.tmpdir(), 'pepe-claude-hook.cjs');
+      try {
+        const existing = fs.existsSync(hookScriptPath) ? fs.readFileSync(hookScriptPath, 'utf-8') : '';
+        if (existing !== claudeHookScript) fs.writeFileSync(hookScriptPath, claudeHookScript, 'utf-8');
+      } catch (err) { console.error('[claude] hook script extract failed:', err); }
+      // 환경변수를 hook 프로세스에 전달 (settings 에서 직접 env 주입 불가하므로 래퍼 배치 사용)
+      const wrapperPath = path.join(os.tmpdir(), 'pepe-claude-hook-wrap.cmd');
+      const wrapperContent = `@echo off\r\nset "ELECTRON_RUN_AS_NODE=1"\r\nset "PEPE_CTRL_PORT=${mcpControlPort}"\r\nset "PEPE_CTRL_TOKEN=${mcpControlToken}"\r\n"${process.execPath}" "${hookScriptPath}"\r\n`;
+      try { fs.writeFileSync(wrapperPath, wrapperContent, 'utf-8'); } catch (err) { console.error('[claude] hook wrapper write failed:', err); }
+
+      const settings = {
+        hooks: {
+          PreToolUse: [{
+            matcher: 'Bash|Edit|Write|Create|Delete|Move|Rename|mcp__.*',
+            hooks: [{
+              type: 'command',
+              command: isWin ? `"${wrapperPath}"` : `node "${hookScriptPath}"`,
+            }],
+          }],
+        },
+      };
+      settingsTmp = path.join(os.tmpdir(), `claude-settings-${Date.now()}.json`);
+      fs.writeFileSync(settingsTmp, JSON.stringify(settings, null, 2), 'utf-8');
+      settingsFlag = `--settings "${settingsTmp}"`;
+      console.log('[claude] per-tool approval enabled. settings:', settingsTmp);
+    }
+
+    // shell 커맨드로 파이프 구성 (claude 는 PATHEXT 로 .cmd 자동 해석)
+    // Windows: chcp 65001 로 UTF-8 코드페이지 전환 (한글 깨짐 방지)
+    const shellCmd = isWin
+      ? `chcp 65001 >nul && type "${tmpFile}" | claude -p ${resumeFlag} ${modelFlag} ${permFlag} ${allowedFlag} ${settingsFlag} ${mcpConfigArg} ${addDirArgs} --output-format stream-json --verbose`
+      : `cat "${tmpFile}" | claude -p ${resumeFlag} ${modelFlag} ${permFlag} ${allowedFlag} ${settingsFlag} ${mcpConfigArg} ${addDirArgs} --output-format stream-json --verbose`;
+    console.log('[claude] shell cmd:', shellCmd);
+    console.log('[claude] PATH has npm:', augmentedPath.toLowerCase().includes('npm'));
+
+    const proc = spawn(shellCmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], env: spawnEnv });
+    claudeProcesses.set(sessionId, proc);
+
+    // 임시 파일 정리 (프로세스 종료 후)
+    const cleanupTmp = () => {
+      try { fs.unlinkSync(tmpFile); } catch {}
+      if (mcpCfgTmp) { try { fs.unlinkSync(mcpCfgTmp); } catch {} }
+      if (settingsTmp) { try { fs.unlinkSync(settingsTmp); } catch {} }
+    };
+
+    let stdoutBuf = '';
+    proc.stdout.setEncoding('utf-8');
+    proc.stdout.on('data', (data: string) => {
+      stdoutBuf += data;
+      const lines = stdoutBuf.split('\n');
+      stdoutBuf = lines.pop() || ''; // 마지막 불완전 라인은 보류
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        console.log('[claude] stdout line:', trimmed.slice(0, 200));
+        try {
+          const msg = JSON.parse(trimmed);
+          mainWindow?.webContents.send('claude:stream', { sessionId, message: msg });
+        } catch {
+          mainWindow?.webContents.send('claude:stream', { sessionId, message: { type: 'text', text: trimmed } });
+        }
+      }
+    });
+    proc.stderr.on('data', (data: Buffer) => {
+      const err = data.toString();
+      console.log('[claude] stderr:', err);
+      mainWindow?.webContents.send('claude:stream', { sessionId, message: { type: 'error', text: err } });
+    });
+    proc.on('error', (err: any) => {
+      console.log('[claude] spawn error:', err);
+      mainWindow?.webContents.send('claude:stream', { sessionId, message: { type: 'error', text: String(err) } });
+    });
+    proc.on('close', (code: number) => {
+      console.log('[claude] close, code:', code);
+      cleanupTmp();
+      claudeProcesses.delete(sessionId);
+      mainWindow?.webContents.send('claude:stream', { sessionId, message: { type: 'done', code } });
+    });
+    return { success: true };
+  } catch (err: any) {
+    console.log('[claude] exception:', err);
+    return { success: false, error: String(err) };
+  }
+});
+
+ipcMain.handle('claude:stop', (_e, { sessionId }: { sessionId: string }) => {
+  const proc = claudeProcesses.get(sessionId);
+  if (proc) { try { proc.kill(); } catch {} claudeProcesses.delete(sessionId); }
+  return { success: true };
 });

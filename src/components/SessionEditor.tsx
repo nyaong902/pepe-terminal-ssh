@@ -25,6 +25,7 @@ type Session = {
   fontSize?: number;
   scrollback?: number;
   icon?: string;
+  initialPath?: string;
 };
 
 type Folder = {
@@ -57,6 +58,7 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
   const [fontSize, setFontSize] = useState(session?.fontSize ?? 0);
   const [scrollback, setScrollback] = useState(session?.scrollback ?? 0);
   const [icon, setIcon] = useState(session?.icon ?? '🖥️');
+  const [initialPath, setInitialPath] = useState(session?.initialPath ?? '');
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -77,6 +79,7 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
     setFontSize(session?.fontSize ?? 0);
     setScrollback(session?.scrollback ?? 0);
     setIcon(session?.icon ?? '🖥️');
+    setInitialPath(session?.initialPath ?? '');
   }, [session]);
 
   const getFolderPath = (f: Folder): string => {
@@ -120,7 +123,7 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
     setSaveError('');
     const auth = authType === 'password' ? { type: 'password', password } : { type: 'key', keyPath };
     const script = loginScript.filter(r => r.expect.trim() !== '' || r.send.trim() !== '');
-    onSave({ id, name, host: normalizeHost(host), port, username, auth, encoding, folderId: folderId || undefined, loginScript: script.length > 0 ? script : undefined, theme: theme || undefined, fontFamily: fontFamily || undefined, fontSize: fontSize || undefined, scrollback: scrollback || undefined, icon: icon || undefined } as Session);
+    onSave({ id, name, host: normalizeHost(host), port, username, auth, encoding, folderId: folderId || undefined, loginScript: script.length > 0 ? script : undefined, theme: theme || undefined, fontFamily: fontFamily || undefined, fontSize: fontSize || undefined, scrollback: scrollback || undefined, icon: icon || undefined, initialPath: initialPath.trim() || undefined } as Session);
   };
 
   return (
@@ -223,6 +226,14 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
 
           <label>Scrollback</label>
           <input type="number" value={scrollback || ''} onChange={e => setScrollback(Number(e.target.value) || 0)} placeholder="(Global Default)" min={1000} max={1000000} step={1000} />
+
+          <label>파일 트리 초기 경로</label>
+          <input
+            type="text"
+            value={initialPath}
+            onChange={e => setInitialPath(e.target.value)}
+            placeholder="예: /home/user/project (비우면 홈 디렉토리)"
+          />
         </div>
 
         {/* ── 로그인 스크립트 ── */}

@@ -207,7 +207,7 @@ class SSHBridge extends EventEmitter {
 
   // ── SFTP ──
 
-  private getSftp(panelId: string): Promise<any> {
+  public getSftp(panelId: string): Promise<any> {
     const cached = this.sftpCache.get(panelId);
     if (cached) return Promise.resolve(cached);
     return new Promise((resolve, reject) => {
@@ -338,6 +338,24 @@ class SSHBridge extends EventEmitter {
 
   async handleLocalRename(oldPath: string, newPath: string): Promise<void> {
     await fs.promises.rename(oldPath, newPath);
+  }
+
+  async handleSFTPReadFile(panelId: string, remotePath: string): Promise<Buffer> {
+    const sftp = await this.getSftp(panelId);
+    return new Promise((resolve, reject) => {
+      sftp.readFile(remotePath, (err: any, data: Buffer) => {
+        if (err) return reject(err);
+        resolve(data);
+      });
+    });
+  }
+
+  async handleSFTPWriteFile(panelId: string, remotePath: string, content: Buffer | string): Promise<void> {
+    const sftp = await this.getSftp(panelId);
+    const buf = typeof content === 'string' ? Buffer.from(content, 'utf-8') : content;
+    return new Promise((resolve, reject) => {
+      sftp.writeFile(remotePath, buf, (err: any) => err ? reject(err) : resolve());
+    });
   }
 
   async handleSFTPDelete(panelId: string, filePath: string): Promise<void> {
@@ -519,6 +537,42 @@ class SSHBridge extends EventEmitter {
         readStream.pipe(writeStream);
       });
     }
+  }
+
+  // SSH exec: 원격에서 쉘 명령 실행하고 stdout/stderr/exitCode 반환
+  // 세션 인코딩(utf-8/cp949/euc-kr 등)에 맞춰 command 바이트 변환 + 출력 디코딩
+  public async handleExec(panelId: string, command: string, timeoutMs = 60000): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+    const entry = this.clients.get(panelId);
+    if (!entry) throw new Error(`SSH session not connected: ${panelId}`);
+    const conn: any = entry.conn;
+    const enc = (entry.encoding || 'utf-8').toLowerCase();
+    const iconv = require('iconv-lite');
+    const useIconv = iconv.encodingExists(enc) && enc !== 'utf-8' && enc !== 'utf8';
+
+    // 명령 문자열을 세션 인코딩 바이트로 변환해서 전달 (한글 깨짐 방지)
+    const commandBuf: Buffer = useIconv ? iconv.encode(command, enc) : Buffer.from(command, 'utf-8');
+    const commandToSend: string | Buffer = useIconv ? commandBuf : command;
+
+    return new Promise((resolve, reject) => {
+      const to = setTimeout(() => reject(new Error('exec timeout')), timeoutMs);
+      conn.exec(commandToSend as any, { pty: false }, (err: any, stream: any) => {
+        if (err) { clearTimeout(to); return reject(err); }
+        const stdoutChunks: Buffer[] = [];
+        const stderrChunks: Buffer[] = [];
+        let exitCode: number | null = null;
+        stream.on('data', (data: Buffer) => { stdoutChunks.push(data); });
+        stream.stderr.on('data', (data: Buffer) => { stderrChunks.push(data); });
+        stream.on('exit', (code: number) => { exitCode = code; });
+        stream.on('close', () => {
+          clearTimeout(to);
+          const outBuf = Buffer.concat(stdoutChunks);
+          const errBuf = Buffer.concat(stderrChunks);
+          const stdout = useIconv ? iconv.decode(outBuf, enc) : outBuf.toString('utf-8');
+          const stderr = useIconv ? iconv.decode(errBuf, enc) : errBuf.toString('utf-8');
+          resolve({ stdout, stderr, exitCode });
+        });
+      });
+    });
   }
 
   async handleSFTPRealPath(panelId: string, remotePath: string): Promise<string> {

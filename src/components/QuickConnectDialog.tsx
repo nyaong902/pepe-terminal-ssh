@@ -54,6 +54,7 @@ export const QuickConnectBar: React.FC<Props> = ({ onConnect, onCancel, forcePro
 
   return (
     <div className="quick-connect-bar" onKeyDown={onKey}>
+      <button className="quick-connect-close" onClick={onCancel} title="닫기">✕</button>
       <span className="quick-connect-label">빠른 연결</span>
       <select
         className="quick-connect-input quick-connect-proto"
@@ -120,7 +121,6 @@ export const QuickConnectBar: React.FC<Props> = ({ onConnect, onCancel, forcePro
       >
         연결
       </button>
-      <button className="quick-connect-close" onClick={onCancel} title="닫기">✕</button>
     </div>
   );
 };

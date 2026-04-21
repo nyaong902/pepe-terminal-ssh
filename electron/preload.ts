@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld('api', {
   sftpDownload: (panelId: string, remotePath: string) => ipcRenderer.invoke('sftp:download', { panelId, remotePath }),
   sftpUpload: (panelId: string, remotePath: string) => ipcRenderer.invoke('sftp:upload', { panelId, remotePath }),
   sftpListDir: (panelId: string, remotePath: string) => ipcRenderer.invoke('sftp:list-dir', { panelId, remotePath }),
+  sftpReadFile: (panelId: string, remotePath: string, encoding?: string) => ipcRenderer.invoke('sftp:read-file', { panelId, remotePath, encoding }),
+  sftpWriteFile: (panelId: string, remotePath: string, content: string, encoding?: string) => ipcRenderer.invoke('sftp:write-file', { panelId, remotePath, content, encoding }),
   onSFTPProgress: (cb: (p: any) => void) => {
     const handler = (_: any, p: any) => cb(p);
     ipcRenderer.on('sftp:progress', handler);
@@ -145,4 +147,28 @@ contextBridge.exposeInMainWorld('api', {
   },
   sshAuthResponse: (panelId: string, responses: string[]) =>
     ipcRenderer.invoke('ssh:auth-response', { panelId, responses }),
+
+  // Claude Code CLI
+  claudeCheck: () => ipcRenderer.invoke('claude:check'),
+  claudeSend: (sessionId: string, prompt: string, addDirs?: string[], disallowBash?: boolean, sshTermId?: string, resumeSessionId?: string | null, permissionMode?: string, model?: string, perToolApproval?: boolean) =>
+    ipcRenderer.invoke('claude:send', { sessionId, prompt, addDirs, disallowBash, sshTermId, resumeSessionId, permissionMode, model, perToolApproval }),
+  claudeHookRespond: (approvalId: string, decision: 'allow' | 'deny', reason?: string) =>
+    ipcRenderer.invoke('claude:hook-respond', { approvalId, decision, reason }),
+  onClaudeHookApprovalRequest: (cb: (p: any) => void) => {
+    const handler = (_: any, p: any) => cb(p);
+    ipcRenderer.on('claude:hook-approval-request', handler);
+    return () => ipcRenderer.removeListener('claude:hook-approval-request', handler);
+  },
+  claudeRegisterMount: (panelId: string, sessionLabel: string) =>
+    ipcRenderer.invoke('claude:register-mount', { panelId, sessionLabel }),
+  claudeUnregisterMount: (panelId: string) =>
+    ipcRenderer.invoke('claude:unregister-mount', { panelId }),
+  claudeGetMountPath: (panelId: string, remotePath: string) =>
+    ipcRenderer.invoke('claude:get-mount-path', { panelId, remotePath }),
+  claudeStop: (sessionId: string) => ipcRenderer.invoke('claude:stop', { sessionId }),
+  onClaudeStream: (cb: (p: any) => void) => {
+    const handler = (_: any, p: any) => cb(p);
+    ipcRenderer.on('claude:stream', handler);
+    return () => ipcRenderer.removeListener('claude:stream', handler);
+  },
 });

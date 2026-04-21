@@ -306,7 +306,17 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
                 onClick={e => {
                   if (e.ctrlKey || e.metaKey) {
                     setSelectedIds(prev => { const next = new Set(prev); if (next.size === 0 && selectedId) next.add(selectedId); next.has(s.id) ? next.delete(s.id) : next.add(s.id); return next; });
-                  } else { setSelectedId(s.id); setSelectedType('session'); setSelectedIds(new Set()); }
+                  } else {
+                    // 같은 세션 재클릭 → 선택 해제 (encoding 창 닫힘)
+                    if (selectedId === s.id && selectedType === 'session') {
+                      setSelectedId(null);
+                      setSelectedIds(new Set());
+                    } else {
+                      setSelectedId(s.id);
+                      setSelectedType('session');
+                      setSelectedIds(new Set());
+                    }
+                  }
                 }}
                 onDoubleClick={() => { if (renamingId !== s.id) handleConnect(s); }}
                 onContextMenu={e => { e.preventDefault(); setSelectedId(s.id); setSelectedType('session'); setContextMenu({ x: e.clientX, y: e.clientY, id: s.id, type: 'session', name: s.name }); }}
@@ -317,7 +327,10 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
                 {renamingId === s.id ? (
                   <input className="folder-rename-input" value={renameValue} onChange={e => setRenameValue(e.target.value)} onBlur={handleRenameSubmit} onKeyDown={e => { if (e.key === 'Enter') handleRenameSubmit(); if (e.key === 'Escape') setRenamingId(null); }} autoFocus onClick={e => e.stopPropagation()} />
                 ) : (
-                  <><div className="session-item-name">{s.icon && <span className="session-icon">{s.icon}</span>}{s.name}</div><div className="session-item-host">{s.host}:{s.port}</div></>
+                  <div className="session-item-name" title={`${s.host}:${s.port}${s.username ? ' ('+s.username+')' : ''}`}>
+                    {s.icon && <span className="session-icon">{s.icon}</span>}{s.name}
+                    <span className="session-item-host-tooltip">{s.host}:{s.port}</span>
+                  </div>
                 )}
               </div>
             );
