@@ -2,7 +2,7 @@
   "name": "pepe-terminal-ssh",
   "productName": "PePe Terminal(SSH)",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "SSH Terminal Client",
   "author": "Claude (feat. ghjeong[prompt])",
   "type": "commonjs",
@@ -81,6 +81,21 @@
       "allowToChangeInstallationDirectory": true,
       "include": "build/installer.nsh",
       "shortcutName": "PePe Terminal(SSH)"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "icon": "public/icon-mac.png",
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
   }
 }
