@@ -1470,7 +1470,7 @@ export const TerminalPanel: React.FC<Props> = ({
       {multiPaste && ReactDOM.createPortal(
         <div className="session-editor-backdrop"
           onMouseDown={e => { (e.currentTarget as any).__clickedBackdrop = (e.target === e.currentTarget); }}
-          onMouseUp={e => { if ((e.currentTarget as any).__clickedBackdrop && e.target === e.currentTarget) setMultiPaste(null); }}
+          onMouseUp={e => { if ((e.currentTarget as any).__clickedBackdrop && e.target === e.currentTarget) { const tid = multiPaste.termId; setMultiPaste(null); setTimeout(() => focusTerm(tid), 0); } }}
         >
           <div className="session-editor" onClick={e => e.stopPropagation()} style={{ width: 480 }}>
             <h3>여러 줄 붙여넣기</h3>
@@ -1482,20 +1482,26 @@ export const TerminalPanel: React.FC<Props> = ({
               style={{ width: '100%', height: 150, background: '#111', color: '#eee', border: '1px solid #333', borderRadius: 4, padding: 8, fontSize: 12, fontFamily: 'monospace', resize: 'vertical', boxSizing: 'border-box' }}
             />
             <div className="session-editor-actions">
-              <button className="btn-cancel" onClick={() => setMultiPaste(null)}>취소</button>
+              <button className="btn-cancel" onClick={() => {
+                const tid = multiPaste.termId;
+                setMultiPaste(null);
+                setTimeout(() => focusTerm(tid), 0);
+              }}>취소</button>
               <button className="btn-save" onClick={() => {
+                const tid = multiPaste.termId;
                 try {
-                  const entry = termStore.get(multiPaste.termId);
+                  const entry = termStore.get(tid);
                   if (entry) {
                     // xterm.paste() — bracketed paste mode 활성 시 자동으로 \e[200~...\e[201~ 래핑
                     entry.term.paste(multiPaste.text);
-                  } else if (ptyConnected.has(multiPaste.termId)) {
-                    (window as any).api.ptyInput(multiPaste.termId, multiPaste.text);
+                  } else if (ptyConnected.has(tid)) {
+                    (window as any).api.ptyInput(tid, multiPaste.text);
                   } else {
-                    (window as any).api.sendSSHInput(multiPaste.termId, multiPaste.text);
+                    (window as any).api.sendSSHInput(tid, multiPaste.text);
                   }
                 } catch {}
                 setMultiPaste(null);
+                setTimeout(() => focusTerm(tid), 0);
               }}>붙여넣기</button>
             </div>
           </div>
@@ -1518,16 +1524,18 @@ export const TerminalPanel: React.FC<Props> = ({
               navigator.clipboard.writeText(sel).catch(() => {});
             }},
             { label: '붙여넣기', onClick: () => {
+              const tid = activeTermId;
               navigator.clipboard.readText().then(text => {
                 if (!text) return;
                 const settings = getTerminalSettings();
                 if (text.includes('\n') && settings.multiLinePaste === 'dialog') {
-                  showMultiLinePasteDialog(activeTermId, text);
+                  showMultiLinePasteDialog(tid, text);
                 } else {
                   try {
-                    const entry = termStore.get(activeTermId);
+                    const entry = termStore.get(tid);
                     if (entry) entry.term.paste(text);
                   } catch {}
+                  setTimeout(() => focusTerm(tid), 0);
                 }
               }).catch(() => {});
             }},

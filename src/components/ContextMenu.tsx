@@ -1,5 +1,5 @@
 // src/components/ContextMenu.tsx
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 
 export type MenuItem = {
   label: string;
@@ -14,15 +14,29 @@ type Props = {
 };
 
 export const ContextMenu: React.FC<Props> = ({ x, y, items, onClose }) => {
+  const menuRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    const close = () => onClose();
-    // 다음 이벤트 루프에서 리스너 등록 (현재 클릭 이벤트 버블링 방지)
-    const timer = setTimeout(() => window.addEventListener('click', close), 0);
-    return () => { clearTimeout(timer); window.removeEventListener('click', close); };
+    // document capture 페이즈에서 mousedown 을 가로채서 메뉴 밖 클릭이면 닫는다.
+    // xterm 등 내부 요소가 stopPropagation 해도 capture 단계는 먼저 실행돼서 영향 없음.
+    // 현재 이벤트 루프 턴에 등록하면 메뉴를 연 바로 그 클릭이 여기에 걸리므로 다음 틱에 등록.
+    const onDown = (e: MouseEvent) => {
+      if (!menuRef.current) return;
+      if (!menuRef.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    const timer = setTimeout(() => {
+      document.addEventListener('mousedown', onDown, true);
+      document.addEventListener('keydown', onKey, true);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('mousedown', onDown, true);
+      document.removeEventListener('keydown', onKey, true);
+    };
   }, [onClose]);
 
   return (
-    <div className="context-menu" style={{ top: y, left: x }} onClick={e => e.stopPropagation()}>
+    <div ref={menuRef} className="context-menu" style={{ top: y, left: x }} onClick={e => e.stopPropagation()}>
       {items.map((item, i) => (
         <div key={i} className="context-menu-item" onClick={() => { item.onClick(); onClose(); }}>
           {item.label}
