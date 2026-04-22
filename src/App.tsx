@@ -8,11 +8,10 @@ import { Layout } from './components/Layout';
 import { SearchBar } from './components/SearchBar';
 import { FileExplorer } from './components/FileExplorer';
 import { FileEditor } from './components/FileEditor';
-import { RemoteFileTree } from './components/RemoteFileTree';
 import { ClaudeChat } from './components/ClaudeChat';
 import { QuickConnectBar, QuickConnectResult } from './components/QuickConnectDialog';
 import { StatusBar } from './components/StatusBar';
-import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect } from './components/TerminalPanel';
+import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect, toggleTreeVisibleForTerm } from './components/TerminalPanel';
 import { getTerminalSettings, saveTerminalSettings, TerminalSettings } from './utils/terminalSettings';
 import { loadKeybindings, matchKeybinding, getKeybindings, DEFAULT_KEYBINDINGS, KEYBINDING_LABELS, keyEventToCombo, setKeybindingListening } from './utils/keybindings';
 import { getThemeList } from './utils/terminalThemes';
@@ -548,6 +547,18 @@ function App() {
         return;
       }
       if (matchKeybinding(e, 'find')) { e.preventDefault(); setShowSearch(prev => !prev); return; }
+      if (matchKeybinding(e, 'toggleFileTree')) {
+        e.preventDefault();
+        const tid = getActiveTermId();
+        if (tid) {
+          toggleTreeVisibleForTerm(tid);
+          [50, 200].forEach(ms => setTimeout(() => {
+            window.dispatchEvent(new Event('resize'));
+            refitAllTerms();
+          }, ms));
+        }
+        return;
+      }
       const termId = getActiveTermId();
       if (!termId) return;
       if (matchKeybinding(e, 'clearScrollback')) { e.preventDefault(); clearScrollbackInTerm(termId); }
@@ -1426,58 +1437,7 @@ function App() {
           } catch {}
         }}
       />
-      {/* 선택된 패널이 SSH 연결된 세션이면 원격 파일 트리 표시 */}
-      {(() => {
-        if (!selectedPanelId || !activeTab) return null;
-        const findLeaf = (node: any, id: string): any => {
-          if (node.type === 'leaf') return node.id === id ? node : null;
-          for (const c of node.children) { const r = findLeaf(c, id); if (r) return r; }
-          return null;
-        };
-        const leaf = findLeaf(activeTab.layout, selectedPanelId);
-        const sess = leaf?.panel?.sessions[leaf.panel.activeIdx];
-        if (!sess || !sess.sessionId || !isTermConnected(sess.termId)) return null;
-        return (
-          <div className="remote-file-tree-container" style={{ width: `${remoteTreeWidth}px` }}>
-            <RemoteFileTree
-              termId={sess.termId}
-              sessionName={sess.sessionName}
-              sessionId={sess.sessionId}
-              onOpenFile={handleOpenRemoteFile}
-              onAttachToClaude={handleAttachToClaude}
-            />
-            <div
-              className="remote-file-tree-resizer"
-              title="드래그하여 너비 조절 (더블클릭: 기본값 240)"
-              onMouseDown={e => {
-                e.preventDefault();
-                const startX = e.clientX;
-                const startWidth = remoteTreeWidth;
-                const onMove = (ev: MouseEvent) => {
-                  const dx = ev.clientX - startX;
-                  const w = Math.max(160, Math.min(800, startWidth + dx));
-                  setRemoteTreeWidth(w);
-                };
-                const onUp = () => {
-                  window.removeEventListener('mousemove', onMove);
-                  window.removeEventListener('mouseup', onUp);
-                  setRemoteTreeWidth(curW => {
-                    if (remoteTreeWidthLoadedRef.current) { try { (window as any).api?.setUIPrefs?.({ remoteTreeWidth: curW }); } catch {} }
-                    return curW;
-                  });
-                  window.dispatchEvent(new Event('resize'));
-                };
-                window.addEventListener('mousemove', onMove);
-                window.addEventListener('mouseup', onUp);
-              }}
-              onDoubleClick={() => {
-                setRemoteTreeWidth(240);
-                try { (window as any).api?.setUIPrefs?.({ remoteTreeWidth: 240 }); } catch {}
-              }}
-            />
-          </div>
-        );
-      })()}
+      {/* 파일 트리는 이제 각 TerminalPanel 내부에서 mini-tab 별로 렌더링됨 (Ctrl+Shift+E 로 토글). */}
       <div className="app-main">
         <div className="tab-bar-row">
           <MenuBar menus={menuDefs} />

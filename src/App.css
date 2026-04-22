@@ -2692,6 +2692,45 @@ html, body {
   overflow: hidden;
   position: relative;
 }
+/* 패널 내부 터미널+파일트리 분할 */
+.panel-terminal-split {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+  overflow: hidden;
+}
+.panel-terminal-split .panel-terminal-area {
+  flex: 1 1 0;
+  min-width: 0;
+  height: auto;
+}
+.panel-file-tree {
+  flex-shrink: 0;
+  min-width: 160px;
+  max-width: 800px;
+  background: #0d0f10;
+  border-right: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+.panel-file-tree-resizer {
+  position: absolute;
+  right: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  z-index: 10;
+  background: transparent;
+  transition: background 0.15s;
+}
+.panel-file-tree-resizer:hover,
+.panel-file-tree-resizer:active {
+  background: rgba(74, 144, 226, 0.4);
+}
 .remote-file-tree-resizer {
   position: absolute;
   right: -3px;

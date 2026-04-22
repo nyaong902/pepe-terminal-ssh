@@ -19,6 +19,10 @@ type CommonHandlers = {
   onRenameSession?: (nodeId: string, termId: string, name: string) => void;
   onConnectDrop?: (nodeId: string, sessionId: string) => void;
   onDuplicateSession?: (nodeId: string, termId: string) => void;
+  treeWidth?: number;
+  onTreeWidthChange?: (w: number) => void;
+  onOpenRemoteFile?: (termId: string, remotePath: string, fileName: string) => void;
+  onAttachToClaude?: (termId: string, remotePath: string, fileName: string, isDir: boolean) => void;
 };
 
 type Props = CommonHandlers & { root: LayoutNode };
@@ -52,6 +56,8 @@ const NodeView: React.FC<NodeProps> = ({ node, ...h }) => {
             onReorderSession={h.onReorderSession} onAddSession={h.onAddSession}
             onRenameSession={h.onRenameSession} onConnectDrop={h.onConnectDrop}
             onDuplicateSession={h.onDuplicateSession} availableShells={h.availableShells}
+            treeWidth={h.treeWidth} onTreeWidthChange={h.onTreeWidthChange}
+            onOpenRemoteFile={h.onOpenRemoteFile} onAttachToClaude={h.onAttachToClaude}
           />
         </div>
       </div>

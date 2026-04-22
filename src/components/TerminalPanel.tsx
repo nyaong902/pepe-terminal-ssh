@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import type { Panel, PanelSession } from '../utils/layoutUtils';
 import { ContextMenu } from './ContextMenu';
+import { RemoteFileTree } from './RemoteFileTree';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { SearchAddon } from 'xterm-addon-search';
@@ -51,6 +52,24 @@ const sshInitialized = new Set<string>();
 const globalConnected = new Set<string>();
 const connectedListeners = new Set<() => void>();
 // IME 조합 상태: 조합 중에는 onData를 건너뛰고, 완료 시 최종 텍스트를 1회 전송
+// 각 터미널(session)별 파일 트리 표시 여부. Ctrl+Shift+E 로 toggleTreeVisibleForTerm 이 호출됨.
+const termTreeVisible: Map<string, boolean> = new Map();
+const treeVisibleChangeListeners: Set<() => void> = new Set();
+export function isTreeVisibleForTerm(termId: string): boolean {
+  return termTreeVisible.get(termId) || false;
+}
+export function toggleTreeVisibleForTerm(termId: string) {
+  termTreeVisible.set(termId, !termTreeVisible.get(termId));
+  treeVisibleChangeListeners.forEach(fn => fn());
+}
+
+// 각 터미널(세션)의 현재 원격 디렉토리. sshBridge 에서 주입한 OSC 7 hook 의 출력을
+// xterm 의 OSC 핸들러가 여기에 저장. 트리 열 때 initialPath 로 사용.
+const termCurrentPwd: Map<string, string> = new Map();
+export function getCurrentPwdForTerm(termId: string): string | undefined {
+  return termCurrentPwd.get(termId);
+}
+
 const termIMEComposing: Map<string, boolean> = new Map();
 // 조합 완료 직후 xterm이 동일 문자열로 onData를 한 번 더 발화할 수 있어 중복 차단용
 const termJustComposed: Map<string, { text: string; at: number }> = new Map();
@@ -119,6 +138,18 @@ function getOrCreateTerm(termId: string): { term: Terminal; fit: FitAddon; searc
     term.loadAddon(search);
     term.loadAddon(unicode11);
     term.unicode.activeVersion = '11';
+    // OSC 7 핸들러 — 원격 쉘이 보낸 file://host/path 를 파싱해서 현재 pwd 저장
+    try {
+      (term as any).parser?.registerOscHandler?.(7, (data: string) => {
+        const m = data.match(/^file:\/\/[^/]*(\/.*)$/);
+        if (m) {
+          let p = m[1];
+          try { p = decodeURIComponent(p); } catch { /* keep encoded */ }
+          termCurrentPwd.set(termId, p);
+        }
+        return true;
+      });
+    } catch { /* older xterm 없으면 무시 */ }
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
       // 단축키 변경 중이면 모든 키 통과
@@ -945,10 +976,16 @@ type Props = {
   onRenameSession?: (nodeId: string, termId: string, name: string) => void;
   onConnectDrop?: (nodeId: string, sessionId: string) => void;
   onDuplicateSession?: (nodeId: string, termId: string) => void;
+  // 파일 트리 관련 (패널 내부 분할 렌더)
+  treeWidth?: number;
+  onTreeWidthChange?: (w: number) => void;
+  onOpenRemoteFile?: (termId: string, remotePath: string, fileName: string) => void;
+  onAttachToClaude?: (termId: string, remotePath: string, fileName: string, isDir: boolean) => void;
 };
 
 export const TerminalPanel: React.FC<Props> = ({
   nodeId, panel, onSplit, onClose, onSelect, onSwitchSession, onCloseSession, onMoveSession, onSplitMoveSession, onReorderSession, onAddSession, onRenameSession, onConnectDrop, onDuplicateSession, availableShells,
+  treeWidth = 240, onTreeWidthChange, onOpenRemoteFile, onAttachToClaude,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mountedTermRef = useRef<string | null>(null);
@@ -964,6 +1001,13 @@ export const TerminalPanel: React.FC<Props> = ({
     const listener = () => forceUpdate(n => n + 1);
     connectedListeners.add(listener);
     return () => { connectedListeners.delete(listener); };
+  }, []);
+
+  // 파일 트리 표시 토글 이벤트 구독 (Ctrl+Shift+E 로 외부에서 호출됨)
+  useEffect(() => {
+    const fn = () => forceUpdate(n => n + 1);
+    treeVisibleChangeListeners.add(fn);
+    return () => { treeVisibleChangeListeners.delete(fn); };
   }, []);
 
   // SSH 리스너 설정
@@ -1429,7 +1473,51 @@ export const TerminalPanel: React.FC<Props> = ({
           title="Close"
         >&times;</button>
       </div>
-      <div ref={containerRef} className="panel-terminal-area" />
+      <div className="panel-terminal-split">
+        {(() => {
+          const treeVisible = !!activeTermId && isTreeVisibleForTerm(activeTermId);
+          const canShowTree = treeVisible && !!activeSession?.sessionId && !!activeTermId && isTermConnected(activeTermId);
+          return (
+            <>
+              {canShowTree && (
+                <div className="panel-file-tree" style={{ width: treeWidth }}>
+                  <RemoteFileTree
+                    termId={activeTermId!}
+                    sessionName={activeSession!.sessionName}
+                    sessionId={activeSession!.sessionId}
+                    initialPath={termCurrentPwd.get(activeTermId!)}
+                    onOpenFile={(tid, rp, fn) => onOpenRemoteFile?.(tid, rp, fn)}
+                    onAttachToClaude={(tid, rp, fn, isDir) => onAttachToClaude?.(tid, rp, fn, isDir)}
+                  />
+                  <div
+                    className="panel-file-tree-resizer"
+                    title="드래그하여 너비 조절 (더블클릭: 기본값 240)"
+                    onMouseDown={e => {
+                      e.preventDefault();
+                      const startX = e.clientX;
+                      const startW = treeWidth;
+                      const onMove = (ev: MouseEvent) => {
+                        const dx = ev.clientX - startX;
+                        const w = Math.max(160, Math.min(800, startW + dx));
+                        onTreeWidthChange?.(w);
+                      };
+                      const onUp = () => {
+                        window.removeEventListener('mousemove', onMove);
+                        window.removeEventListener('mouseup', onUp);
+                        window.dispatchEvent(new Event('resize'));
+                      };
+                      window.addEventListener('mousemove', onMove);
+                      window.addEventListener('mouseup', onUp);
+                    }}
+                    onDoubleClick={() => onTreeWidthChange?.(240)}
+                  />
+                </div>
+              )}
+              <div ref={containerRef} className="panel-terminal-area" />
+            </>
+          );
+        })()}
+      </div>
       {miniCtx && (
         <ContextMenu
           x={miniCtx.x} y={miniCtx.y}

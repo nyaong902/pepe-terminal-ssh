@@ -61,9 +61,19 @@ class SSHBridge extends EventEmitter {
           try {
             // 런타임 인코딩 변경 지원: 매번 현재 record의 encoding을 읽음
             const cur = (this.clients.get(panelId)?.encoding || initialEncoding).toLowerCase();
-            const str = cur === 'utf-8' || cur === 'utf8'
+            let str = cur === 'utf-8' || cur === 'utf8'
               ? data.toString('utf8')
               : iconv.decode(data, cur);
+
+            // 셸 검출 OSC 9 응답 가로채기 (화면에는 보내지 않음)
+            const shellDetectRe = /\x1b\]9;pepe-shell:([^\x1b\x07]*)(?:\x1b\\|\x07)/;
+            const m = str.match(shellDetectRe);
+            if (m) {
+              const shellPath = m[1].trim();
+              str = str.replace(shellDetectRe, '');
+              this._installOsc7Hook(panelId, shellPath);
+            }
+
             this.emit('message', { type: 'data', panelId, data: str });
 
             // 스크립트 실행 중이면 데이터 전달
@@ -85,6 +95,23 @@ class SSHBridge extends EventEmitter {
         });
 
         this.clients.set(panelId, { conn, stream, encoding: initialEncoding });
+
+        // OSC 7 hook 주입 전에 셸 검출 필요 (bash/zsh/tcsh 문법이 달라서).
+        // 단계:
+        //   1) 'printf ... $0' 로 셸 이름을 OSC 9 페이로드로 실어 보내게 함 (화면엔 안 보임).
+        //      tcsh 도 미정의 변수 에러 없이 $0 은 참조 가능.
+        //   2) 데이터 스트림 파싱해서 pepe-shell:<shell> 감지하면 알맞은 hook 주입.
+        //   3) 이후 매 프롬프트마다 OSC 7 이 자동 방출됨.
+        const injectDelay = session.loginScript && session.loginScript.length > 0 ? 3500 : 800;
+        setTimeout(() => {
+          try {
+            // $SHELL 은 로그인 셸 경로 — bash/zsh/tcsh 모두 env var 로 노출.
+            // tcsh 는 interactive 모드에서 $0 미정의로 에러내므로 $SHELL 이 더 안전.
+            // 단일 인용부호로 감싸 printf format 은 어느 셸에서도 그대로 전달.
+            const detect = ` printf '\\033]9;pepe-shell:%s\\033\\134' "$SHELL"\n`;
+            stream.write(detect);
+          } catch {}
+        }, injectDelay);
       });
     });
 
@@ -180,6 +207,30 @@ class SSHBridge extends EventEmitter {
   getEncoding(panelId: string): string | null {
     const rec = this.clients.get(panelId);
     return rec?.encoding || null;
+  }
+
+  // 셸 검출 결과로 적절한 OSC 7 hook 주입. 매 프롬프트마다 원격 쉘이 현재 디렉토리를
+  // OSC 7 (file://host/path) 시퀀스로 보내게 함.
+  private _installOsc7Hook(panelId: string, shellPath: string) {
+    const rec = this.clients.get(panelId);
+    if (!rec) return;
+    const shell = (shellPath || '').toLowerCase();
+    let cmd = '';
+    // 순서 중요: zsh/csh/tcsh 모두 'sh' 문자열 포함 → 구체적 셸부터 검사.
+    // 호스트명은 localhost 로 고정 — 파서는 path 부분만 사용하므로 무관하고,
+    // tcsh 의 $HOST 미정의 에러를 피하려는 목적.
+    if (shell.includes('zsh')) {
+      cmd = ` precmd_pepe_osc7(){ printf '\\033]7;file://localhost%s\\033\\134' "$PWD" }; typeset -ga precmd_functions; precmd_functions+=(precmd_pepe_osc7)\n`;
+    } else if (shell.includes('tcsh') || shell.includes('csh')) {
+      // csh / tcsh — alias precmd 는 tcsh 기능.
+      cmd = ` alias precmd 'printf "\\033]7;file://localhost%s\\033\\134" "$cwd"'\n`;
+    } else if (shell.includes('bash') || shell.endsWith('/sh') || shell === 'sh') {
+      cmd = ` PROMPT_COMMAND='printf "\\033]7;file://localhost%s\\033\\134" "$PWD"'\n`;
+    } else {
+      // 지원 안 하는 셸 (fish 등) — 조용히 무시
+      return;
+    }
+    try { rec.stream.write(cmd); } catch {}
   }
 
   handleResize(panelId: string, cols: number, rows: number) {
