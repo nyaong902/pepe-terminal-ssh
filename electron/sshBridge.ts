@@ -125,6 +125,16 @@ class SSHBridge extends EventEmitter {
     });
 
     // 3. 그 소켓 위에 두번째 SSH Client 연결
+    //    점프 타겟이 Solaris/레거시 OpenSSH 등 구버전일 수 있어서 기본 알고리즘 외
+    //    레거시까지 허용. SUPPORTED_* 는 ssh2 가 현재 시스템 crypto 기준으로 이미
+    //    필터한 목록이라, unsupported algorithm 에러 없이 안전하게 넓혀 쓸 수 있음.
+    const ssh2Constants = require('ssh2/lib/protocol/constants');
+    const LEGACY_ALGORITHMS = {
+      kex: ssh2Constants.SUPPORTED_KEX,
+      serverHostKey: ssh2Constants.SUPPORTED_SERVER_HOST_KEY,
+      cipher: ssh2Constants.SUPPORTED_CIPHER,
+      hmac: ssh2Constants.SUPPORTED_MAC,
+    };
     const jumpConn = new Client();
     await new Promise<void>((resolve, reject) => {
       const onReady = () => { cleanup(); resolve(); };
@@ -136,6 +146,7 @@ class SSHBridge extends EventEmitter {
         sock,
         username: jumpUser,
         ...authCfg,
+        algorithms: LEGACY_ALGORITHMS,
         tryKeyboard: !!jumpPassword, // 비밀번호 모드면 keyboard-interactive 도 허용
         readyTimeout: 15000,
         keepaliveInterval: 10000,
@@ -152,14 +163,16 @@ class SSHBridge extends EventEmitter {
       conn.sftp((err: any, s: any) => err ? reject(err) : resolve(s));
     });
     const candidates = ['.ssh/id_rsa', '.ssh/id_ed25519', '.ssh/id_ecdsa'];
-    for (const rel of candidates) {
-      try {
-        const data: Buffer = await new Promise((res, rej) => {
-          sftp.readFile(rel, (err: any, d: Buffer) => err ? rej(err) : res(d));
-        });
-        if (data && data.length > 0) return data;
-      } catch { /* try next */ }
-    }
+    // 병렬 시도 — 네트워크 왕복 1회 만큼의 시간에 모든 후보 확인
+    const attempts = candidates.map(rel => new Promise<Buffer | null>((resolve) => {
+      sftp.readFile(rel, (err: any, d: Buffer) => {
+        if (err || !d || d.length === 0) return resolve(null);
+        resolve(d);
+      });
+    }));
+    const results = await Promise.all(attempts);
+    // id_rsa 우선순위 — 먼저 나타난 non-null 반환
+    for (const r of results) { if (r) return r; }
     return null;
   }
 
