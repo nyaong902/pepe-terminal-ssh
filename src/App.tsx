@@ -11,7 +11,7 @@ import { FileEditor } from './components/FileEditor';
 import { ClaudeChat } from './components/ClaudeChat';
 import { QuickConnectBar, QuickConnectResult } from './components/QuickConnectDialog';
 import { StatusBar } from './components/StatusBar';
-import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect, toggleTreeVisibleForTerm } from './components/TerminalPanel';
+import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect, toggleTreeVisibleForTerm, startInitialConnectWatchdog } from './components/TerminalPanel';
 import { getTerminalSettings, saveTerminalSettings, TerminalSettings } from './utils/terminalSettings';
 import { loadKeybindings, matchKeybinding, getKeybindings, DEFAULT_KEYBINDINGS, KEYBINDING_LABELS, keyEventToCombo, setKeybindingListening } from './utils/keybindings';
 import { getThemeList } from './utils/terminalThemes';
@@ -21,6 +21,7 @@ import {
   PanelSession,
   splitNode,
   splitNodeWithSessions,
+  addSessionsAsTile,
   removeLeafNode,
   addSessionToPanel,
   appendSessionsToPanel,
@@ -235,7 +236,8 @@ function App() {
       active.scrollIntoView({ block: 'nearest' });
     }
   }, [broadcastHistoryIdx, broadcastShowHistory]);
-  const [splitSessionPicker, setSplitSessionPicker] = useState<{ dir: 'row' | 'column'; sessions: { sessionId: string; sessionName: string; host: string; termId: string }[]; srcTermId?: string } | null>(null);
+  const [splitSessionPicker, setSplitSessionPicker] = useState<{ dir: 'row' | 'column'; sessions: { sessionId: string; sessionName: string; host: string; termId: string }[]; srcTermId?: string; targetNodeId: string } | null>(null);
+  const [floatingPanelId, setFloatingPanelId] = useState<string | null>(null);
   const [remoteTreeWidth, setRemoteTreeWidth] = useState<number>(240);
   const remoteTreeWidthLoadedRef = useRef(false);
   const [showClaudeChat, setShowClaudeChat] = useState(true);
@@ -450,23 +452,7 @@ function App() {
       if ((matchKeybinding(e, 'splitSessionH') || matchKeybinding(e, 'splitSessionV')) && activeTab && selectedPanelId) {
         e.preventDefault();
         const dir: 'row' | 'column' = matchKeybinding(e, 'splitSessionV') ? 'row' : 'column';
-        const curTid = getActiveTermId();
-        const connectedSessions: { sessionId: string; sessionName: string; host: string; termId: string }[] = [];
-        const collectLeaves = (node: LayoutNode) => {
-          if (node.type === 'leaf') {
-            for (const s of node.panel.sessions) {
-              if (isTermConnected(s.termId)) {
-                const info = getTermSessionInfo(s.termId);
-                if (info && info.sessionId && !connectedSessions.some(c => c.sessionId === info.sessionId)) {
-                  connectedSessions.push({ sessionId: info.sessionId, sessionName: info.sessionName, host: info.host, termId: s.termId });
-                }
-              }
-            }
-          } else { for (const c of node.children) collectLeaves(c); }
-        };
-        collectLeaves(activeTab.layout);
-        if (connectedSessions.length === 0) { splitPanel(activeTab.id, selectedPanelId, dir); return; }
-        setSplitSessionPicker({ dir, sessions: connectedSessions, srcTermId: curTid || undefined });
+        openSplitSessionPicker(dir, selectedPanelId);
         return;
       }
       // Alt+1..9: 워크스페이스 내 모든 미니탭(모든 패널) 기준 N번째 탭으로 이동 (Alt+9는 마지막 탭)
@@ -704,17 +690,48 @@ function App() {
     setTabs(prev => prev.map(t => t.id === tabId ? { ...t, layout: fn(t.layout) } : t));
   };
 
+  // 현재 활성 세션의 folderId 기준으로 같은 폴더 세션들을 picker 로 띄운다.
+  // 픽커에서 선택된 세션을 새 termId 로 연결해서 targetNodeId 패널을 분할해 배치.
+  // 활성 세션이 없거나 folder 내 다른 세션이 없으면 그냥 빈 분할.
+  const openSplitSessionPicker = async (dir: 'row' | 'column', targetNodeId: string) => {
+    if (!activeTab) return;
+    const curTid = getActiveTermId();
+    const curInfo = curTid ? getTermSessionInfo(curTid) : null;
+    let folderSessions: { sessionId: string; sessionName: string; host: string; termId: string }[] = [];
+    try {
+      const data: any = await (window as any).api?.listSessions?.();
+      const all: any[] = data?.sessions ?? data ?? [];
+      if (curInfo?.sessionId) {
+        const cur = all.find(s => s.id === curInfo.sessionId);
+        const folderId = cur?.folderId;
+        folderSessions = all
+          .filter(s => (s.folderId ?? undefined) === (folderId ?? undefined))
+          .map(s => ({ sessionId: s.id, sessionName: s.name, host: s.host || '', termId: '' }));
+      } else {
+        // 활성 세션 모르면 루트(폴더 없음) 세션들
+        folderSessions = all
+          .filter(s => !s.folderId)
+          .map(s => ({ sessionId: s.id, sessionName: s.name, host: s.host || '', termId: '' }));
+      }
+    } catch {}
+    if (folderSessions.length === 0) {
+      splitPanel(activeTab.id, targetNodeId, dir);
+      return;
+    }
+    setSplitSessionPicker({ dir, sessions: folderSessions, srcTermId: curTid || undefined, targetNodeId });
+  };
+
   const splitPanel = (tabId: TabId, targetNodeId: string, direction: 'row' | 'column') => {
     updateLayout(tabId, layout => splitNode(layout, targetNodeId, direction));
     setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
   };
 
   const handleSplitSessionSelect = (target: { sessionId: string; sessionName: string; host: string; termId: string }) => {
-    if (!activeTab || !selectedPanelId || !splitSessionPicker) return;
-    const { dir } = splitSessionPicker;
+    if (!activeTab || !splitSessionPicker) return;
+    const { dir, targetNodeId } = splitSessionPicker;
     const newTermId = `term-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const newSess: PanelSession = { termId: newTermId, sessionId: target.sessionId, sessionName: target.sessionName };
-    updateLayout(activeTab.id, layout => splitNodeWithSessions(layout, selectedPanelId, dir, [newSess], false));
+    updateLayout(activeTab.id, layout => splitNodeWithSessions(layout, targetNodeId, dir, [newSess], false));
     setTimeout(async () => {
       // 선택된 세션의 원본 termId에서 스타일 복제
       cloneTermStyle(target.termId, newTermId);
@@ -1184,8 +1201,8 @@ function App() {
     {
       label: '창',
       items: [
-        { label: '세로 분할', action: () => { if (activeTab && selectedPanelId) splitPanel(activeTab.id, selectedPanelId, 'row'); }, disabled: !selectedPanelId },
-        { label: '가로 분할', action: () => { if (activeTab && selectedPanelId) splitPanel(activeTab.id, selectedPanelId, 'column'); }, disabled: !selectedPanelId },
+        { label: '세로 분할', action: () => { if (activeTab && selectedPanelId) openSplitSessionPicker('row', selectedPanelId); }, disabled: !selectedPanelId },
+        { label: '가로 분할', action: () => { if (activeTab && selectedPanelId) openSplitSessionPicker('column', selectedPanelId); }, disabled: !selectedPanelId },
         { separator: true, label: '' },
         { label: '화면 지우기', shortcut: 'Ctrl+Shift+L', action: () => { const tid = getActiveTermId(); if (tid) clearScreenInTerm(tid); } },
         { label: '스크롤 버퍼 지우기', shortcut: 'Ctrl+Shift+B', action: () => { const tid = getActiveTermId(); if (tid) clearScrollbackInTerm(tid); } },
@@ -1384,13 +1401,49 @@ function App() {
                   if (s.fontFamily || s.fontSize) applyFontToTerm(tid, s.fontFamily, s.fontSize);
                 }, 200);
                 registerTermSession(tid, s.id, s.name, s.host ?? '');
-                ((sessionId, termId) => {
-                  window.api?.connectSSH?.(termId, sessionId)?.then((r: string) => {
-                    if (r === 'need-password') promptPasswordAndConnect(termId, sessionId);
+                // sshd MaxStartups(기본 10:30:60) 초과 drop 방지 — 500ms 엇갈림으로 connect
+                setTimeout(() => {
+                  startInitialConnectWatchdog(tid, s.id);
+                  window.api?.connectSSH?.(tid, s.id)?.then((r: string) => {
+                    if (r === 'need-password') promptPasswordAndConnect(tid, s.id);
                   }).catch(() => {});
-                })(s.id, tid);
+                }, i * 500);
               }
-              setTimeout(() => refitAllTerms(), 200);
+              // refit + 첫 세션으로 포커스 고정 (동시 연결 시 마지막 연결 세션이 포커스 훔치는 현상 방지)
+              setTimeout(() => { refitAllTerms(); if (newTermIds[0]) focusTerm(newTermIds[0]); }, 200);
+            }, 50);
+          } else if (mode === 'split-tile') {
+            // 타일 분할: N 개 세션을 ceil(sqrt(N)) 열 × ceil(N/cols) 행 그리드로 배치
+            const newTermIds = sessList.map(() => `term-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+            const panelSessions: PanelSession[] = sessList.map((s, i) => ({
+              termId: newTermIds[i],
+              sessionId: s.id,
+              sessionName: s.name,
+            }));
+            updateLayout(activeTab.id, layout =>
+              addSessionsAsTile(layout, panelId, panelSessions[0], panelSessions.slice(1))
+            );
+            setTimeout(() => {
+              for (let i = 0; i < sessList.length; i++) {
+                const s = sessList[i] as any;
+                const tid = newTermIds[i];
+                if (s.scrollback) applyScrollbackToTerm(tid, s.scrollback);
+                setTimeout(() => {
+                  if (s.theme) applyThemeToTerm(tid, s.theme);
+                  if (s.fontFamily || s.fontSize) applyFontToTerm(tid, s.fontFamily, s.fontSize);
+                }, 200);
+                registerTermSession(tid, s.id, s.name, s.host ?? '');
+                // sshd MaxStartups(기본 10:30:60) 초과 drop 방지 — 500ms 엇갈림으로 connect
+                setTimeout(() => {
+                  startInitialConnectWatchdog(tid, s.id);
+                  window.api?.connectSSH?.(tid, s.id)?.then((r: string) => {
+                    if (r === 'need-password') promptPasswordAndConnect(tid, s.id);
+                  }).catch(() => {});
+                }, i * 500);
+              }
+              // refit + 첫 세션 포커스 — stagger 전체가 끝난 뒤 포커스 확정 (뒤늦게 마운트되는 터미널이 훔쳐가는 것 방지)
+              const focusDelay = 200 + sessList.length * 500 + 300;
+              setTimeout(() => { refitAllTerms(); if (newTermIds[0]) focusTerm(newTermIds[0]); }, focusDelay);
             }, 50);
           } else {
             const dir: 'row' | 'column' = mode === 'split-v' ? 'row' : 'column';
@@ -1428,13 +1481,17 @@ function App() {
                   if (s.fontFamily || s.fontSize) applyFontToTerm(tid, s.fontFamily, s.fontSize);
                 }, 200);
                 registerTermSession(tid, s.id, s.name, s.host ?? '');
-                ((sessionId, termId) => {
-                  window.api?.connectSSH?.(termId, sessionId)?.then((r: string) => {
-                    if (r === 'need-password') promptPasswordAndConnect(termId, sessionId);
+                // sshd MaxStartups(기본 10:30:60) 초과 drop 방지 — 500ms 엇갈림으로 connect
+                setTimeout(() => {
+                  startInitialConnectWatchdog(tid, s.id);
+                  window.api?.connectSSH?.(tid, s.id)?.then((r: string) => {
+                    if (r === 'need-password') promptPasswordAndConnect(tid, s.id);
                   }).catch(() => {});
-                })(s.id, tid);
+                }, i * 500);
               }
-              setTimeout(() => refitAllTerms(), 200);
+              // refit + 첫 세션 포커스 — stagger 전체가 끝난 뒤 포커스 확정 (뒤늦게 마운트되는 터미널이 훔쳐가는 것 방지)
+              const focusDelay = 200 + sessList.length * 500 + 300;
+              setTimeout(() => { refitAllTerms(); if (newTermIds[0]) focusTerm(newTermIds[0]); }, focusDelay);
             }, 50);
           }
         }}
@@ -1551,8 +1608,13 @@ function App() {
         {activeTab && activeTab.type !== 'fileExplorer' && activeTab.type !== 'fileEditor' && (
           <Layout root={activeTab.layout}
             selectedPanelId={selectedPanelId}
-            onSplit={(nodeId, dir) => splitPanel(activeTab.id, nodeId, dir)}
+            onSplit={(nodeId, dir) => openSplitSessionPicker(dir, nodeId)}
             onClose={nodeId => closePanel(activeTab.id, nodeId)}
+            floatingPanelId={floatingPanelId}
+            onToggleFloat={nodeId => {
+              setFloatingPanelId(prev => prev === nodeId ? null : nodeId);
+              setTimeout(() => { window.dispatchEvent(new Event('resize')); refitAllTerms(); }, 120);
+            }}
             onSelectPanel={id => setSelectedPanelId(id)}
             onMovePanel={movePanel}
             onSwitchSession={handleSwitchSession}

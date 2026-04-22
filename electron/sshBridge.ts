@@ -23,6 +23,9 @@ interface BridgeMessage {
 
 class SSHBridge extends EventEmitter {
   private clients: Map<string, ClientRecord> = new Map();
+  // 연결 중(아직 ready 안 된) Client — handleDisconnect 가 찾을 수 있도록 별도 추적.
+  // ready 시점에 삭제 + clients 에 등록. error 시에도 삭제.
+  private pendingConnects: Map<string, any> = new Map();
   private sftpCache: Map<string, any> = new Map();
   private scriptRunners: Map<string, ExpectSendRunner> = new Map();
   private pendingAuth: Map<string, (responses: string[]) => void> = new Map();
@@ -34,10 +37,18 @@ class SSHBridge extends EventEmitter {
 
   async handleConnect(panelId: string, session: any, cols?: number, rows?: number) {
     if (this.clients.has(panelId)) return;
+    // 이전 pending 연결이 있으면 먼저 정리 (retry 시 이중 연결 방지)
+    const prev = this.pendingConnects.get(panelId);
+    if (prev) {
+      try { prev.end(); } catch {}
+      this.pendingConnects.delete(panelId);
+    }
 
     const conn = new Client();
+    this.pendingConnects.set(panelId, conn);
 
     conn.on('ready', async () => {
+      this.pendingConnects.delete(panelId);
       this.emit('message', { type: 'connected', panelId });
       // 점프 호스트 설정이 있으면 primary 위에 터널 + 두번째 SSH 열고 그쪽에서 shell + SFTP
       const jumpHost = session.jumpTargetHost?.trim();
@@ -54,6 +65,9 @@ class SSHBridge extends EventEmitter {
     });
 
     conn.on('error', (err: any) => {
+      console.log(`[ssh-error] panelId=${panelId} host=${session?.host} msg=${err?.message || err} code=${err?.code || ''} level=${err?.level || ''}`);
+      try { require('electron').BrowserWindow.getAllWindows()[0]?.webContents.send('debug:log', `[ssh-error] ${session?.host} ${err?.message || err}`); } catch {}
+      this.pendingConnects.delete(panelId);
       this.clients.delete(panelId);
       this.sftpCache.delete(panelId);
       this.scriptRunners.delete(panelId);
@@ -103,6 +117,13 @@ class SSHBridge extends EventEmitter {
     const jumpUser = (session.jumpTargetUser || 'root').trim();
     const jumpPort = Number(session.jumpTargetPort) || 22;
     const jumpPassword = typeof session.jumpTargetPassword === 'string' ? session.jumpTargetPassword : '';
+    const t0 = Date.now();
+    const stage = (name: string) => {
+      const msg = `[jump-${panelId.slice(-6)}] ${name} +${Date.now() - t0}ms`;
+      console.log(msg);
+      try { require('electron').BrowserWindow.getAllWindows()[0]?.webContents.send('debug:log', msg); } catch {}
+    };
+    stage('start');
 
     // 1. 인증 방법 결정: 비밀번호 우선, 없으면 primary 의 ~/.ssh/ 키 자동 사용
     const authCfg: any = {};
@@ -116,6 +137,7 @@ class SSHBridge extends EventEmitter {
       authCfg.privateKey = keyBuf;
     }
 
+    stage('key-read done');
     // 2. primary 위에 TCP 포워딩 — 점프 타겟:port 로
     const sock: any = await new Promise((resolve, reject) => {
       primaryConn.forwardOut('127.0.0.1', 0, jumpHost, jumpPort, (err: any, s: any) => {
@@ -123,6 +145,7 @@ class SSHBridge extends EventEmitter {
         resolve(s);
       });
     });
+    stage('forwardOut done');
 
     // 3. 그 소켓 위에 두번째 SSH Client 연결
     //    점프 타겟이 Solaris/레거시 OpenSSH 등 구버전일 수 있어서 기본 알고리즘 외
@@ -148,12 +171,14 @@ class SSHBridge extends EventEmitter {
         ...authCfg,
         algorithms: LEGACY_ALGORITHMS,
         tryKeyboard: !!jumpPassword, // 비밀번호 모드면 keyboard-interactive 도 허용
-        readyTimeout: 15000,
+        // Solaris 레거시 KEX 는 CPU 집약적이라 동시 접속 시 15초로 부족. 30초로 늘림.
+        readyTimeout: 30000,
         keepaliveInterval: 10000,
         keepaliveCountMax: 3,
       } as any);
     });
 
+    stage('jumpConn ready');
     // 4. 점프 타겟에서 shell + SFTP. primary 는 transport 로 유지.
     this._openShellOnConn(panelId, session, jumpConn, cols, rows, primaryConn);
   }
@@ -238,7 +263,9 @@ class SSHBridge extends EventEmitter {
       const injectDelay = session.loginScript && session.loginScript.length > 0 ? 3500 : 800;
       setTimeout(() => {
         try {
-          const detect = ` printf '\\033]9;pepe-shell:%s\\033\\134\\033[F\\033[2K' "$SHELL"\n`;
+          // OSC 9 (셸 검출) 출력 후 전체 화면 clear + 커서 홈(1,1) 이동. cls 한 것처럼 깨끗.
+          // \033[H = 커서 홈, \033[2J = 전체 화면 erase. 스크롤백은 유지됨.
+          const detect = ` printf '\\033]9;pepe-shell:%s\\033\\134\\033[H\\033[2J' "$SHELL"\n`;
           stream.write(detect);
         } catch {}
       }, injectDelay);
@@ -307,9 +334,9 @@ class SSHBridge extends EventEmitter {
     // 순서 중요: zsh/csh/tcsh 모두 'sh' 문자열 포함 → 구체적 셸부터 검사.
     // 호스트명은 localhost 로 고정 — 파서는 path 부분만 사용하므로 무관하고,
     // tcsh 의 $HOST 미정의 에러를 피하려는 목적.
-    // 각 명령 끝에 printf '\033[F\033[2K' 붙여서 명령줄 자체를 화면에서 지움
-    // (쉘이 다음 프롬프트를 그 자리에 덮어 그려서 사용자에겐 안 보임).
-    const clearLine = `; printf '\\033[F\\033[2K'`;
+    // OSC 7 hook 주입 명령 이후 전체 화면 clear + 커서 홈 이동 (cls 같은 효과).
+    // 좁은 분할에서 wrap 된 긴 명령줄까지 통째로 지움. 스크롤백은 유지.
+    const clearLine = `; printf '\\033[H\\033[2J'`;
     if (shell.includes('zsh')) {
       cmd = ` precmd_pepe_osc7(){ printf '\\033]7;file://localhost%s\\033\\134' "$PWD" }; typeset -ga precmd_functions; precmd_functions+=(precmd_pepe_osc7)${clearLine}\n`;
     } else if (shell.includes('tcsh') || shell.includes('csh')) {
@@ -335,14 +362,18 @@ class SSHBridge extends EventEmitter {
   }
 
   handleDisconnect(panelId: string) {
+    // 연결 완료 상태
     const rec = this.clients.get(panelId);
-    if (!rec) return;
-    try {
-      rec.conn.end();
-    } catch {
-      // already closed
+    if (rec) {
+      try { rec.conn.end(); } catch {}
+      this.clients.delete(panelId);
     }
-    this.clients.delete(panelId);
+    // 아직 ready 안 된 pending 연결도 정리
+    const pending = this.pendingConnects.get(panelId);
+    if (pending) {
+      try { pending.end(); } catch {}
+      this.pendingConnects.delete(panelId);
+    }
     this.sftpCache.delete(panelId);
     this.scriptRunners.delete(panelId);
   }

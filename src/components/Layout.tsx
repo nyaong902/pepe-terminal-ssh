@@ -23,6 +23,8 @@ type CommonHandlers = {
   onTreeWidthChange?: (w: number) => void;
   onOpenRemoteFile?: (termId: string, remotePath: string, fileName: string) => void;
   onAttachToClaude?: (termId: string, remotePath: string, fileName: string, isDir: boolean) => void;
+  floatingPanelId?: string | null;
+  onToggleFloat?: (nodeId: string) => void;
 };
 
 type Props = CommonHandlers & { root: LayoutNode };
@@ -43,8 +45,9 @@ const NodeView: React.FC<NodeProps> = ({ node, ...h }) => {
       if (from && h.onMovePanel) h.onMovePanel(from, node.id, 'inside');
     };
     const activeTermId = node.panel.sessions[node.panel.activeIdx]?.termId || '';
+    const isFloating = h.floatingPanelId === node.id;
     return (
-      <div className="layout-leaf" data-active-term={activeTermId}>
+      <div className={`layout-leaf ${isFloating ? 'floating' : ''}`} data-active-term={activeTermId}>
         <div className={`layout-leaf-inner ${h.selectedPanelId === node.id ? 'selected' : ''}`}
           onDragOver={e => e.preventDefault()} onDrop={handleDrop}
         >
@@ -58,6 +61,7 @@ const NodeView: React.FC<NodeProps> = ({ node, ...h }) => {
             onDuplicateSession={h.onDuplicateSession} availableShells={h.availableShells}
             treeWidth={h.treeWidth} onTreeWidthChange={h.onTreeWidthChange}
             onOpenRemoteFile={h.onOpenRemoteFile} onAttachToClaude={h.onAttachToClaude}
+            isFloating={isFloating} onToggleFloat={h.onToggleFloat}
           />
         </div>
       </div>

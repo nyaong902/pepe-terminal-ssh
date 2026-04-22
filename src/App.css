@@ -1331,6 +1331,36 @@ html, body {
   background: #4a9bd5;
 }
 
+.panel-opacity-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 60px;
+  height: 14px;
+  background: transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+  margin: 0 4px;
+  padding: 0;
+}
+.panel-opacity-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  background: #333;
+  border-radius: 2px;
+}
+.panel-opacity-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  background: #3a8bc5;
+  border-radius: 50%;
+  margin-top: -4px;
+  box-shadow: 0 0 2px #3a8bc5;
+}
+.panel-opacity-slider:hover::-webkit-slider-thumb {
+  background: #4a9bd5;
+}
+
 .panel-header .panel-btn-close:hover {
   background: #c53030;
   color: #fff;
@@ -1582,6 +1612,7 @@ html, body {
   display: flex;
   min-height: 0;
   overflow: hidden;
+  position: relative; /* floating panel 의 absolute 기준점 */
 }
 
 .layout-leaf {
@@ -1592,6 +1623,22 @@ html, body {
   padding: 0;
   box-sizing: border-box;
   background: transparent;
+}
+
+/* 플로팅 확대 — 현재 layout-root 영역을 꽉 채우며 다른 모든 leaf 위로 */
+.layout-leaf.floating {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  background: #181818;
+  box-shadow: 0 0 20px rgba(0,0,0,0.6);
+}
+
+/* 활성 버튼 (플로팅 등) */
+.panel-btn.panel-btn-active {
+  background: #2b6b9b;
+  color: #fff;
+  border-color: #3a8bc5;
 }
 
 .layout-leaf-inner {
@@ -2928,6 +2975,29 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* 파일 카테고리별 색상 — data-cat 매칭 */
+.remote-file-item[data-cat="dir"] .remote-file-name     { color: #8ac6ff; font-weight: 500; }
+.remote-file-item[data-cat="c"] .remote-file-name       { color: #6d9fe1; }
+.remote-file-item[data-cat="py"] .remote-file-name      { color: #f0c64c; }
+.remote-file-item[data-cat="js"] .remote-file-name      { color: #f7df1e; }
+.remote-file-item[data-cat="ts"] .remote-file-name      { color: #3b8fd1; }
+.remote-file-item[data-cat="go"] .remote-file-name      { color: #5dccfb; }
+.remote-file-item[data-cat="rs"] .remote-file-name      { color: #d5a76a; }
+.remote-file-item[data-cat="java"] .remote-file-name    { color: #e0834c; }
+.remote-file-item[data-cat="rb"] .remote-file-name      { color: #e55b5b; }
+.remote-file-item[data-cat="php"] .remote-file-name     { color: #8993c3; }
+.remote-file-item[data-cat="script"] .remote-file-name  { color: #8bc555; }
+.remote-file-item[data-cat="log"] .remote-file-name     { color: #a68b5b; font-style: italic; }
+.remote-file-item[data-cat="doc"] .remote-file-name     { color: #dadada; }
+.remote-file-item[data-cat="json"] .remote-file-name    { color: #c47b6c; }
+.remote-file-item[data-cat="config"] .remote-file-name  { color: #b080c5; }
+.remote-file-item[data-cat="archive"] .remote-file-name { color: #e5704a; }
+.remote-file-item[data-cat="image"] .remote-file-name   { color: #c9a1d8; }
+.remote-file-item[data-cat="exec"] .remote-file-name    { color: #76d672; font-weight: 500; }
+.remote-file-item[data-cat="data"] .remote-file-name    { color: #d9b84c; }
+.remote-file-item[data-cat="other"] .remote-file-name   { color: #c5c5c5; }
+
 .remote-file-loading {
   padding: 12px;
   color: #888;

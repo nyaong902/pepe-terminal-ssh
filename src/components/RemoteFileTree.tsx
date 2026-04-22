@@ -1,6 +1,52 @@
 // src/components/RemoteFileTree.tsx
 import React, { useState, useEffect, useCallback } from 'react';
 
+// 확장자 → 카테고리. CSS 에서 data-cat 으로 색상 매칭.
+const EXT_CAT: Record<string, string> = {
+  // C/C++
+  c: 'c', h: 'c', cpp: 'c', hpp: 'c', cc: 'c', cxx: 'c', hxx: 'c',
+  // Python / Go / Rust / Java / Ruby / PHP
+  py: 'py', pyw: 'py', pyx: 'py',
+  js: 'js', mjs: 'js', cjs: 'js', jsx: 'js',
+  ts: 'ts', tsx: 'ts',
+  go: 'go', rs: 'rs', java: 'java', rb: 'rb', php: 'php',
+  // Script
+  sh: 'script', bash: 'script', zsh: 'script', ksh: 'script', csh: 'script',
+  tcsh: 'script', ps1: 'script', bat: 'script', cmd: 'script', pl: 'script',
+  // Log
+  log: 'log', err: 'log', trace: 'log',
+  // Doc
+  md: 'doc', txt: 'doc', rst: 'doc', pdf: 'doc', rtf: 'doc',
+  // Config / Data
+  json: 'json',
+  yaml: 'config', yml: 'config', toml: 'config', ini: 'config',
+  conf: 'config', cfg: 'config', xml: 'config', properties: 'config', env: 'config',
+  // Archive
+  zip: 'archive', tar: 'archive', gz: 'archive', tgz: 'archive',
+  bz2: 'archive', xz: 'archive', '7z': 'archive', rar: 'archive', jar: 'archive',
+  // Image
+  png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', bmp: 'image',
+  svg: 'image', ico: 'image', webp: 'image',
+  // Executable / Binary
+  exe: 'exec', bin: 'exec', out: 'exec', dll: 'exec', so: 'exec', o: 'exec', a: 'exec',
+  // Tabular data
+  csv: 'data', tsv: 'data', sql: 'data', db: 'data', sqlite: 'data',
+};
+
+function fileCategory(name: string): string {
+  const idx = name.lastIndexOf('.');
+  if (idx <= 0) return 'other'; // 숨김파일(.xxx) 혹은 확장자 없음
+  const ext = name.slice(idx + 1).toLowerCase();
+  return EXT_CAT[ext] || 'other';
+}
+
+const CAT_ICON: Record<string, string> = {
+  c: '📘', py: '🐍', js: '📜', ts: '📜',
+  go: '🐹', rs: '🦀', java: '☕', rb: '💎', php: '🐘',
+  script: '⚙️', log: '📋', doc: '📝', json: '🔖', config: '⚙️',
+  archive: '📦', image: '🖼️', exec: '⚡', data: '📊',
+};
+
 type FileEntry = {
   name: string;
   path: string;
@@ -94,6 +140,9 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
       const nodes: TreeNode[] = files
         .filter((f: any) => f.name !== '.' && f.name !== '..')
         .sort((a: any, b: any) => {
+          // mtime 내림차순 (최근 파일이 위). 같으면 폴더 우선, 마지막으로 이름 오름차순.
+          const dm = (b.mtime || 0) - (a.mtime || 0);
+          if (dm !== 0) return dm;
           if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
           return a.name.localeCompare(b.name);
         })
@@ -209,10 +258,12 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
 
   const renderNode = (node: TreeNode, depth: number): React.ReactNode => {
     const isCollapsed = collapsed.has(node.path);
+    const cat = node.isDir ? 'dir' : fileCategory(node.name);
     return (
       <React.Fragment key={node.path}>
         <div
           className={`remote-file-item ${node.isDir ? 'folder' : 'file'}`}
+          data-cat={cat}
           style={{ paddingLeft: 8 + depth * 14 }}
           onClick={() => {
             if (node.isDir) toggleFolder(node);
@@ -229,7 +280,7 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
           ) : (
             <span className="remote-file-toggle-space" />
           )}
-          <span className="remote-file-icon">{node.isDir ? '📁' : '📄'}</span>
+          <span className="remote-file-icon">{node.isDir ? '📁' : CAT_ICON[cat] || '📄'}</span>
           <span className="remote-file-name">{node.name}</span>
         </div>
         {node.isDir && !isCollapsed && node.children && node.children.map(c => renderNode(c, depth + 1))}
@@ -288,11 +339,10 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
           const parent = root.path.replace(/\/[^/]+\/?$/, '') || '/';
           navigateTo(parent);
         }} title="상위 폴더">▲</button>
-        <button className="remote-file-path-home" onClick={async () => {
-          const home = await (window as any).api?.feHomeDir?.('remote', termId);
-          const homePath = typeof home === 'string' ? home : (home?.path || '/');
-          navigateTo(homePath);
-        }} title="홈">🏠</button>
+        <button className="remote-file-path-home" onClick={() => {
+          if (!root) return;
+          navigateTo(root.path);
+        }} title="새로고침 (현재 경로 다시 로드)">⟳</button>
       </div>
       <div className="remote-file-list">
         {root.children && root.children.map(c => renderNode(c, 0))}

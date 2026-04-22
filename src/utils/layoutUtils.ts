@@ -44,6 +44,67 @@ export function splitNodeWithSessions(
   return { ...root, children: root.children.map(child => splitNodeWithSessions(child, targetId, direction, sessions, insertBefore)) };
 }
 
+/**
+ * 타겟 leaf 를 grid(행×열) 타일 레이아웃으로 교체. 첫 세션은 기존 leaf 의 panel 에
+ * minitab 으로 추가되어 기존 세션들을 보존. 나머지 세션들은 각각 새 leaf 로 배치.
+ * 차원 계산: cols = ceil(sqrt(N)), rows = ceil(N/cols). 마지막 행은 적을 수 있음.
+ *   N=2 → 1×2 (좌우)
+ *   N=3 → 2행(위2/아래1)
+ *   N=4 → 2×2
+ *   N=6 → 2×3
+ *   N=9 → 3×3
+ */
+export function addSessionsAsTile(
+  root: LayoutNode,
+  targetLeafId: string,
+  firstSession: PanelSession,
+  extraSessions: PanelSession[],
+): LayoutNode {
+  const N = 1 + extraSessions.length;
+  const cols = Math.ceil(Math.sqrt(N));
+  const rows = Math.ceil(N / cols);
+
+  const makeExtraLeaf = (sess: PanelSession): LeafNode => ({
+    id: makeId('node'),
+    type: 'leaf',
+    panel: { id: makeId('panel'), sessions: [sess], activeIdx: 0 },
+  });
+
+  const walk = (node: LayoutNode): LayoutNode => {
+    if (node.type === 'leaf' && node.id === targetLeafId) {
+      // 기존 panel + 첫 세션을 minitab 으로 추가 (기존 세션 보존)
+      const firstLeaf: LeafNode = {
+        id: node.id,
+        type: 'leaf',
+        panel: {
+          ...node.panel,
+          sessions: [...node.panel.sessions, firstSession],
+          activeIdx: node.panel.sessions.length,
+        },
+      };
+      if (N === 1) return firstLeaf;
+      const allLeaves: LeafNode[] = [firstLeaf, ...extraSessions.map(makeExtraLeaf)];
+      const rowNodes: LayoutNode[] = [];
+      for (let r = 0; r < rows; r++) {
+        const start = r * cols;
+        const rowLeaves = allLeaves.slice(start, start + cols);
+        if (rowLeaves.length === 0) continue;
+        if (rowLeaves.length === 1) {
+          rowNodes.push(rowLeaves[0]);
+        } else {
+          rowNodes.push({ id: makeId('container'), type: 'row', children: rowLeaves });
+        }
+      }
+      if (rowNodes.length === 1) return rowNodes[0];
+      return { id: makeId('container'), type: 'column', children: rowNodes };
+    }
+    if (node.type === 'leaf') return node;
+    return { ...node, children: node.children.map(walk) };
+  };
+
+  return walk(root);
+}
+
 export function splitNode(
   root: LayoutNode,
   targetId: string,
