@@ -527,11 +527,15 @@ class SSHBridge extends EventEmitter {
     if (await this.isSrcDirectory(src)) {
       await this.ensureDstDir(dst);
       const entries = await this.listSrcDir(src);
-      const sep = (p: string) => (p.endsWith('/') || p.endsWith('\\')) ? '' : (src.mode === 'local' ? '\\' : '/');
-      const dsep = (p: string) => (p.endsWith('/') || p.endsWith('\\')) ? '' : (dst.mode === 'local' ? '\\' : '/');
+      // 로컬은 OS 네이티브 separator(path.sep), 원격(SFTP)은 항상 '/'
+      const joinPath = (base: string, name: string, mode: string): string => {
+        if (mode === 'local') return path.join(base, name);
+        if (base.endsWith('/')) return base + name;
+        return base + '/' + name;
+      };
       for (const entry of entries) {
-        const childSrc = { ...src, path: src.path + sep(src.path) + entry };
-        const childDst = { ...dst, path: dst.path + dsep(dst.path) + entry };
+        const childSrc = { ...src, path: joinPath(src.path, entry, src.mode) };
+        const childDst = { ...dst, path: joinPath(dst.path, entry, dst.mode) };
         await this.handleTransfer(childSrc, childDst, entry);
       }
       this.emit('message', { type: 'sftp-complete', panelId: 'transfer', data: JSON.stringify({ filename, direction: 'dir-done' }) });

@@ -40,8 +40,8 @@ contextBridge.exposeInMainWorld('api', {
   feConnectedSessions: () => ipcRenderer.invoke('fe:connected-sessions'),
 
   // SFTP
-  sftpDownload: (panelId: string, remotePath: string) => ipcRenderer.invoke('sftp:download', { panelId, remotePath }),
-  sftpUpload: (panelId: string, remotePath: string) => ipcRenderer.invoke('sftp:upload', { panelId, remotePath }),
+  sftpDownload: (panelId: string, remotePath: string, isDir?: boolean) => ipcRenderer.invoke('sftp:download', { panelId, remotePath, isDir }),
+  sftpUpload: (panelId: string, remotePath: string, kind?: 'file' | 'folder') => ipcRenderer.invoke('sftp:upload', { panelId, remotePath, kind }),
   sftpListDir: (panelId: string, remotePath: string) => ipcRenderer.invoke('sftp:list-dir', { panelId, remotePath }),
   sftpReadFile: (panelId: string, remotePath: string, encoding?: string) => ipcRenderer.invoke('sftp:read-file', { panelId, remotePath, encoding }),
   sftpWriteFile: (panelId: string, remotePath: string, content: string, encoding?: string) => ipcRenderer.invoke('sftp:write-file', { panelId, remotePath, content, encoding }),

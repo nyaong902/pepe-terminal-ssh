@@ -311,6 +311,39 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
               setCtxMenu(null);
             }}>📂 이 폴더로 이동</div>
           )}
+          <div className="remote-file-ctx-item" onClick={async () => {
+            const node = ctxMenu.node;
+            setCtxMenu(null);
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              await (window as any).api?.sftpDownload?.(termId, node.path, node.isDir);
+              if (node.isDir) {
+                // 폴더 다운로드 완료 후 갱신할 필요는 없음 (원격 변경 아님)
+              }
+            } catch {}
+          }}>💾 다운로드{ctxMenu.node.isDir ? ' (폴더 재귀)' : ''}</div>
+          {ctxMenu.node.isDir && (
+            <>
+              <div className="remote-file-ctx-item" onClick={async () => {
+                const node = ctxMenu.node;
+                setCtxMenu(null);
+                try {
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const r = await (window as any).api?.sftpUpload?.(termId, node.path, 'file');
+                  if (r?.success) navigateTo(node.path);
+                } catch {}
+              }}>📥 파일 업로드</div>
+              <div className="remote-file-ctx-item" onClick={async () => {
+                const node = ctxMenu.node;
+                setCtxMenu(null);
+                try {
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const r = await (window as any).api?.sftpUpload?.(termId, node.path, 'folder');
+                  if (r?.success) navigateTo(node.path);
+                } catch {}
+              }}>📁 폴더 업로드 (재귀)</div>
+            </>
+          )}
           {onAttachToClaude && (
             <div className="remote-file-ctx-item claude" onClick={() => {
               onAttachToClaude(termId, ctxMenu.node.path, ctxMenu.node.name, ctxMenu.node.isDir);

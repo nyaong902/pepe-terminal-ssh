@@ -858,15 +858,37 @@ ipcMain.handle('fe:connected-sessions', () => {
 
 // ── SFTP IPC ──
 
-ipcMain.handle('sftp:download', async (_e, { panelId, remotePath }: { panelId: string; remotePath: string }) => {
+ipcMain.handle('sftp:download', async (_e, { panelId, remotePath, isDir }: { panelId: string; remotePath: string; isDir?: boolean }) => {
   if (!mainWindow) return null;
+  const bridge = getSSHBridge();
+  const baseName = remotePath.split('/').filter(Boolean).pop() || 'download';
+  if (isDir) {
+    // 폴더 다운로드 — 부모 폴더 고른 뒤 그 안에 원격 폴더 이름으로 재귀 복사
+    const pick = await dialog.showOpenDialog(mainWindow, {
+      title: '다운로드 받을 위치 선택',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (pick.canceled || pick.filePaths.length === 0) return null;
+    const parentDir = pick.filePaths[0];
+    const localDst = path.join(parentDir, baseName);
+    try {
+      await bridge.handleTransfer(
+        { mode: 'remote', termId: panelId, path: remotePath },
+        { mode: 'local', path: localDst },
+        baseName,
+      );
+      return { success: true, localPath: localDst };
+    } catch (err: any) {
+      return { success: false, error: String(err) };
+    }
+  }
+  // 파일 다운로드 — 저장 이름까지 지정
   const result = await dialog.showSaveDialog(mainWindow, {
     title: '원격 파일 저장',
-    defaultPath: remotePath.split('/').pop() || 'download',
+    defaultPath: baseName,
   });
   if (result.canceled || !result.filePath) return null;
   try {
-    const bridge = getSSHBridge();
     await bridge.handleSFTPDownload(panelId, remotePath, result.filePath);
     return { success: true, localPath: result.filePath };
   } catch (err: any) {
@@ -874,19 +896,28 @@ ipcMain.handle('sftp:download', async (_e, { panelId, remotePath }: { panelId: s
   }
 });
 
-ipcMain.handle('sftp:upload', async (_e, { panelId, remotePath }: { panelId: string; remotePath: string }) => {
+ipcMain.handle('sftp:upload', async (_e, { panelId, remotePath, kind }: { panelId: string; remotePath: string; kind?: 'file' | 'folder' }) => {
   if (!mainWindow) return null;
+  const isFolder = kind === 'folder';
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: '업로드할 파일 선택',
-    properties: ['openFile'],
+    title: isFolder ? '업로드할 폴더 선택' : '업로드할 파일 선택',
+    properties: [isFolder ? 'openDirectory' : 'openFile'],
   });
   if (result.canceled || result.filePaths.length === 0) return null;
   const localPath = result.filePaths[0];
-  const filename = localPath.replace(/\\/g, '/').split('/').pop() || '';
+  const filename = localPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
   const fullRemote = remotePath.endsWith('/') ? remotePath + filename : remotePath + '/' + filename;
   try {
     const bridge = getSSHBridge();
-    await bridge.handleSFTPUpload(panelId, localPath, fullRemote);
+    if (isFolder) {
+      await bridge.handleTransfer(
+        { mode: 'local', path: localPath },
+        { mode: 'remote', termId: panelId, path: fullRemote },
+        filename,
+      );
+    } else {
+      await bridge.handleSFTPUpload(panelId, localPath, fullRemote);
+    }
     return { success: true, remotePath: fullRemote };
   } catch (err: any) {
     return { success: false, error: String(err) };
