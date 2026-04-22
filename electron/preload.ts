@@ -69,6 +69,11 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('window:maximized', listener);
     return () => ipcRenderer.removeListener('window:maximized', listener);
   },
+  onDebugLog: (cb: (msg: string) => void) => {
+    const listener = (_e: any, msg: string) => cb(msg);
+    ipcRenderer.on('debug:log', listener);
+    return () => ipcRenderer.removeListener('debug:log', listener);
+  },
 
   // SSH control
   resetSSHState: (panelId: string) => ipcRenderer.invoke('ssh:reset-state', panelId),

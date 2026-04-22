@@ -279,6 +279,14 @@ function App() {
     const off = (window as any).api?.onWindowMaximized?.((m: boolean) => setIsMaximized(!!m));
     return () => { try { off?.(); } catch {} };
   }, []);
+  // main 프로세스 디버그 로그를 DevTools Console 로 포워딩
+  useEffect(() => {
+    const off = (window as any).api?.onDebugLog?.((msg: string) => {
+      // eslint-disable-next-line no-console
+      console.log('%c[main]', 'color:#8ab4f8', msg);
+    });
+    return () => { try { off?.(); } catch {} };
+  }, []);
   const [fullscreenTermId, setFullscreenTermId] = useState<string | null>(null);
   const fsWasMaxRef = useRef(false);
   const [showQuickConnect, setShowQuickConnect] = useState(() => {

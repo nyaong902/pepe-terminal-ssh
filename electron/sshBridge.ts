@@ -7,9 +7,10 @@ import iconv from 'iconv-lite';
 import type { LoginScriptRule } from './sessionsStore';
 
 interface ClientRecord {
-  conn: any;
+  conn: any;           // 활성 SSH 연결 (점프 미사용 시 primary, 사용 시 jumpConn)
   stream?: any;
   encoding?: string;
+  primaryConn?: any;   // 점프 사용 시 transport 로 쓰이는 primary 연결 (세션 종료 시 함께 해제)
 }
 
 interface BridgeMessage {
@@ -36,85 +37,20 @@ class SSHBridge extends EventEmitter {
 
     const conn = new Client();
 
-    conn.on('ready', () => {
+    conn.on('ready', async () => {
       this.emit('message', { type: 'connected', panelId });
-
-      const shellCols = typeof cols === 'number' ? cols : 120;
-      const shellRows = typeof rows === 'number' ? rows : 24;
-
-      conn.shell({ cols: shellCols, rows: shellRows, term: 'xterm-256color' }, (err: any, stream: any) => {
-        if (err) {
-          this.emit('message', { type: 'error', panelId, error: String(err) });
-          return;
+      // 점프 호스트 설정이 있으면 primary 위에 터널 + 두번째 SSH 열고 그쪽에서 shell + SFTP
+      const jumpHost = session.jumpTargetHost?.trim();
+      if (jumpHost) {
+        try {
+          await this._setupJumpedSession(panelId, session, conn, cols, rows);
+        } catch (err: any) {
+          this.emit('message', { type: 'error', panelId, error: `점프 호스트 연결 실패: ${err?.message || String(err)}` });
+          try { conn.end(); } catch {}
         }
-
-        const initialEncoding = session?.encoding || 'utf-8';
-
-        // Expect/Send 로그인 스크립트 설정
-        if (session.loginScript && session.loginScript.length > 0) {
-          const runner = new ExpectSendRunner(stream, session.loginScript);
-          this.scriptRunners.set(panelId, runner);
-          runner.start();
-        }
-
-        stream.on('data', (data: Buffer) => {
-          try {
-            // 런타임 인코딩 변경 지원: 매번 현재 record의 encoding을 읽음
-            const cur = (this.clients.get(panelId)?.encoding || initialEncoding).toLowerCase();
-            let str = cur === 'utf-8' || cur === 'utf8'
-              ? data.toString('utf8')
-              : iconv.decode(data, cur);
-
-            // 셸 검출 OSC 9 응답 가로채기 (화면에는 보내지 않음)
-            const shellDetectRe = /\x1b\]9;pepe-shell:([^\x1b\x07]*)(?:\x1b\\|\x07)/;
-            const m = str.match(shellDetectRe);
-            if (m) {
-              const shellPath = m[1].trim();
-              str = str.replace(shellDetectRe, '');
-              this._installOsc7Hook(panelId, shellPath);
-            }
-
-            this.emit('message', { type: 'data', panelId, data: str });
-
-            // 스크립트 실행 중이면 데이터 전달
-            const runner = this.scriptRunners.get(panelId);
-            if (runner && runner.isRunning()) {
-              runner.feed(str);
-            }
-          } catch {
-            this.emit('message', { type: 'data', panelId, data: data.toString('utf8') });
-          }
-        });
-
-        stream.on('close', () => {
-          this.clients.delete(panelId);
-          this.sftpCache.delete(panelId);
-          this.scriptRunners.delete(panelId);
-          this.emit('message', { type: 'closed', panelId });
-          conn.end();
-        });
-
-        this.clients.set(panelId, { conn, stream, encoding: initialEncoding });
-
-        // OSC 7 hook 주입 전에 셸 검출 필요 (bash/zsh/tcsh 문법이 달라서).
-        // 단계:
-        //   1) 'printf ... $0' 로 셸 이름을 OSC 9 페이로드로 실어 보내게 함 (화면엔 안 보임).
-        //      tcsh 도 미정의 변수 에러 없이 $0 은 참조 가능.
-        //   2) 데이터 스트림 파싱해서 pepe-shell:<shell> 감지하면 알맞은 hook 주입.
-        //   3) 이후 매 프롬프트마다 OSC 7 이 자동 방출됨.
-        const injectDelay = session.loginScript && session.loginScript.length > 0 ? 3500 : 800;
-        setTimeout(() => {
-          try {
-            // $SHELL 은 로그인 셸 경로 — bash/zsh/tcsh 모두 env var 로 노출.
-            // tcsh 는 interactive 모드에서 $0 미정의로 에러내므로 $SHELL 이 더 안전.
-            // 단일 인용부호로 감싸 printf format 은 어느 셸에서도 그대로 전달.
-            // 검출 printf 뒤에 \033[F\033[2K (CPL + EL) 붙여서 명령줄 자체를 화면에서 지움.
-            // 쉘이 다음 프롬프트를 그 자리에 덮어 그리므로 사용자에겐 안 보임.
-            const detect = ` printf '\\033]9;pepe-shell:%s\\033\\134\\033[F\\033[2K' "$SHELL"\n`;
-            stream.write(detect);
-          } catch {}
-        }, injectDelay);
-      });
+      } else {
+        this._openShellOnConn(panelId, session, conn, cols, rows, undefined);
+      }
     });
 
     conn.on('error', (err: any) => {
@@ -157,6 +93,143 @@ class SSHBridge extends EventEmitter {
     });
 
     conn.connect(cfg);
+  }
+
+  // 점프 호스트 설정: primary 연결 위에 TCP 터널 생성 + 두번째 SSH 핸드셰이크 + 셸 오픈.
+  // primary 의 ~/.ssh/ 에 있는 키 파일(id_rsa/id_ed25519/id_ecdsa)을 SFTP 로 읽어
+  // 점프 타겟 인증에 재사용 (EMS→MPM01 passwordless 설정 그대로 활용).
+  private async _setupJumpedSession(panelId: string, session: any, primaryConn: any, cols?: number, rows?: number): Promise<void> {
+    const jumpHost = session.jumpTargetHost.trim();
+    const jumpUser = (session.jumpTargetUser || 'root').trim();
+    const jumpPort = Number(session.jumpTargetPort) || 22;
+    const jumpPassword = typeof session.jumpTargetPassword === 'string' ? session.jumpTargetPassword : '';
+
+    // 1. 인증 방법 결정: 비밀번호 우선, 없으면 primary 의 ~/.ssh/ 키 자동 사용
+    const authCfg: any = {};
+    if (jumpPassword) {
+      authCfg.password = jumpPassword;
+    } else {
+      const keyBuf = await this._readSshKeyFromConn(primaryConn);
+      if (!keyBuf) {
+        throw new Error(`${session.host} 의 ~/.ssh/ 에서 사용 가능한 SSH 키(id_rsa/id_ed25519/id_ecdsa) 미발견. 점프 타겟 비밀번호를 입력하거나 키 파일을 등록하세요.`);
+      }
+      authCfg.privateKey = keyBuf;
+    }
+
+    // 2. primary 위에 TCP 포워딩 — 점프 타겟:port 로
+    const sock: any = await new Promise((resolve, reject) => {
+      primaryConn.forwardOut('127.0.0.1', 0, jumpHost, jumpPort, (err: any, s: any) => {
+        if (err) return reject(err);
+        resolve(s);
+      });
+    });
+
+    // 3. 그 소켓 위에 두번째 SSH Client 연결
+    const jumpConn = new Client();
+    await new Promise<void>((resolve, reject) => {
+      const onReady = () => { cleanup(); resolve(); };
+      const onErr = (e: any) => { cleanup(); reject(e); };
+      const cleanup = () => { jumpConn.removeListener('ready', onReady); jumpConn.removeListener('error', onErr); };
+      jumpConn.once('ready', onReady);
+      jumpConn.once('error', onErr);
+      jumpConn.connect({
+        sock,
+        username: jumpUser,
+        ...authCfg,
+        tryKeyboard: !!jumpPassword, // 비밀번호 모드면 keyboard-interactive 도 허용
+        readyTimeout: 15000,
+        keepaliveInterval: 10000,
+        keepaliveCountMax: 3,
+      } as any);
+    });
+
+    // 4. 점프 타겟에서 shell + SFTP. primary 는 transport 로 유지.
+    this._openShellOnConn(panelId, session, jumpConn, cols, rows, primaryConn);
+  }
+
+  private async _readSshKeyFromConn(conn: any): Promise<Buffer | null> {
+    const sftp: any = await new Promise((resolve, reject) => {
+      conn.sftp((err: any, s: any) => err ? reject(err) : resolve(s));
+    });
+    const candidates = ['.ssh/id_rsa', '.ssh/id_ed25519', '.ssh/id_ecdsa'];
+    for (const rel of candidates) {
+      try {
+        const data: Buffer = await new Promise((res, rej) => {
+          sftp.readFile(rel, (err: any, d: Buffer) => err ? rej(err) : res(d));
+        });
+        if (data && data.length > 0) return data;
+      } catch { /* try next */ }
+    }
+    return null;
+  }
+
+  // 주어진 연결 위에 shell 을 열고 스트림·핸들러 연결. jump 사용 시 primaryConn 도 함께 받아
+  // close 시 둘 다 정리.
+  private _openShellOnConn(panelId: string, session: any, conn: any, cols: number | undefined, rows: number | undefined, primaryConn: any | undefined): void {
+    const shellCols = typeof cols === 'number' ? cols : 120;
+    const shellRows = typeof rows === 'number' ? rows : 24;
+
+    conn.shell({ cols: shellCols, rows: shellRows, term: 'xterm-256color' }, (err: any, stream: any) => {
+      if (err) {
+        this.emit('message', { type: 'error', panelId, error: String(err) });
+        try { primaryConn?.end(); } catch {}
+        return;
+      }
+
+      const initialEncoding = session?.encoding || 'utf-8';
+
+      // Expect/Send 로그인 스크립트 설정
+      if (session.loginScript && session.loginScript.length > 0) {
+        const runner = new ExpectSendRunner(stream, session.loginScript);
+        this.scriptRunners.set(panelId, runner);
+        runner.start();
+      }
+
+      stream.on('data', (data: Buffer) => {
+        try {
+          const cur = (this.clients.get(panelId)?.encoding || initialEncoding).toLowerCase();
+          let str = cur === 'utf-8' || cur === 'utf8'
+            ? data.toString('utf8')
+            : iconv.decode(data, cur);
+
+          const shellDetectRe = /\x1b\]9;pepe-shell:([^\x1b\x07]*)(?:\x1b\\|\x07)/;
+          const m = str.match(shellDetectRe);
+          if (m) {
+            const shellPath = m[1].trim();
+            str = str.replace(shellDetectRe, '');
+            this._installOsc7Hook(panelId, shellPath);
+          }
+
+          this.emit('message', { type: 'data', panelId, data: str });
+
+          const runner = this.scriptRunners.get(panelId);
+          if (runner && runner.isRunning()) {
+            runner.feed(str);
+          }
+        } catch {
+          this.emit('message', { type: 'data', panelId, data: data.toString('utf8') });
+        }
+      });
+
+      stream.on('close', () => {
+        this.clients.delete(panelId);
+        this.sftpCache.delete(panelId);
+        this.scriptRunners.delete(panelId);
+        this.emit('message', { type: 'closed', panelId });
+        try { conn.end(); } catch {}
+        try { primaryConn?.end(); } catch {}
+      });
+
+      this.clients.set(panelId, { conn, stream, encoding: initialEncoding, primaryConn });
+
+      const injectDelay = session.loginScript && session.loginScript.length > 0 ? 3500 : 800;
+      setTimeout(() => {
+        try {
+          const detect = ` printf '\\033]9;pepe-shell:%s\\033\\134\\033[F\\033[2K' "$SHELL"\n`;
+          stream.write(detect);
+        } catch {}
+      }, injectDelay);
+    });
   }
 
   handleAuthResponse(panelId: string, responses: string[]) {
@@ -358,6 +431,7 @@ class SSHBridge extends EventEmitter {
       });
     });
   }
+
 
   // ── 로컬 파일 조작 ──
 

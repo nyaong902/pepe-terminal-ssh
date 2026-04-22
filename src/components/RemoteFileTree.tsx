@@ -82,9 +82,14 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
       for (let i = 0; i < retries; i++) {
         result = await (window as any).api?.feListDir?.('remote', path, termId);
         if (result?.files) break;
+        // 명시적 에러면 retry 안 함 (SFTP 채널 누적 방지)
+        if (result?.error) break;
         if (i < retries - 1) await new Promise(r => setTimeout(r, 500));
       }
-      if (!result || !result.files) return [];
+      if (!result || !result.files) {
+        console.error(`[RemoteFileTree] loadChildren("${path}") returned no files:`, result?.error || result);
+        return [];
+      }
       const files: FileEntry[] = result.files;
       const nodes: TreeNode[] = files
         .filter((f: any) => f.name !== '.' && f.name !== '..')
