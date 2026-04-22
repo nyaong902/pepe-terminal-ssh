@@ -2,6 +2,31 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Editor, { OnMount } from '@monaco-editor/react';
 
+// Electron 환경에서 Monaco 우클릭 메뉴의 Paste 가 동작하지 않는 문제 수정.
+// 원인: standalone monaco 의 PasteAction 이 clipboardService.triggerPaste() 에 의존하는데
+// 그 서비스는 standalone 환경에서 undefined 를 반환하고, navigator.clipboard fallback 은
+// `isWeb === true` 일 때만 타서 Electron 에서는 paste 가 no-op 이 됨.
+// 해결: monaco.editor.registerCommand 로 동일한 command id 를 덮어써서 paste 커맨드 자체를 교체.
+let pasteOverrideInstalled = false;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function installMonacoPasteOverride(monaco: any) {
+  if (pasteOverrideInstalled) return;
+  pasteOverrideInstalled = true;
+  monaco.editor.registerCommand('editor.action.clipboardPasteAction', async () => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const editors: any[] = monaco.editor.getEditors();
+      const focused = editors.find(e => e?.hasTextFocus?.());
+      if (!focused || !focused.hasModel?.()) return;
+      const text = await navigator.clipboard.readText();
+      if (!text) return;
+      focused.trigger('keyboard', 'paste', { text });
+    } catch {
+      // 클립보드 읽기 실패 시 조용히 무시
+    }
+  });
+}
+
 type Props = {
   termId: string;
   remotePath: string;
@@ -123,6 +148,8 @@ export const FileEditor: React.FC<Props> = ({ termId, remotePath, fileName, onDi
     editorRef.current = editor;
     // Ctrl+S 저장
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { save(); });
+    // Electron 우클릭 Paste 동작 수정 (전역 1회 설치)
+    installMonacoPasteOverride(monaco);
   };
 
   if (loading) return <div className="file-editor-loading">파일을 불러오는 중...</div>;
