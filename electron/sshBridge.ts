@@ -108,7 +108,9 @@ class SSHBridge extends EventEmitter {
             // $SHELL 은 로그인 셸 경로 — bash/zsh/tcsh 모두 env var 로 노출.
             // tcsh 는 interactive 모드에서 $0 미정의로 에러내므로 $SHELL 이 더 안전.
             // 단일 인용부호로 감싸 printf format 은 어느 셸에서도 그대로 전달.
-            const detect = ` printf '\\033]9;pepe-shell:%s\\033\\134' "$SHELL"\n`;
+            // 검출 printf 뒤에 \033[F\033[2K (CPL + EL) 붙여서 명령줄 자체를 화면에서 지움.
+            // 쉘이 다음 프롬프트를 그 자리에 덮어 그리므로 사용자에겐 안 보임.
+            const detect = ` printf '\\033]9;pepe-shell:%s\\033\\134\\033[F\\033[2K' "$SHELL"\n`;
             stream.write(detect);
           } catch {}
         }, injectDelay);
@@ -219,13 +221,16 @@ class SSHBridge extends EventEmitter {
     // 순서 중요: zsh/csh/tcsh 모두 'sh' 문자열 포함 → 구체적 셸부터 검사.
     // 호스트명은 localhost 로 고정 — 파서는 path 부분만 사용하므로 무관하고,
     // tcsh 의 $HOST 미정의 에러를 피하려는 목적.
+    // 각 명령 끝에 printf '\033[F\033[2K' 붙여서 명령줄 자체를 화면에서 지움
+    // (쉘이 다음 프롬프트를 그 자리에 덮어 그려서 사용자에겐 안 보임).
+    const clearLine = `; printf '\\033[F\\033[2K'`;
     if (shell.includes('zsh')) {
-      cmd = ` precmd_pepe_osc7(){ printf '\\033]7;file://localhost%s\\033\\134' "$PWD" }; typeset -ga precmd_functions; precmd_functions+=(precmd_pepe_osc7)\n`;
+      cmd = ` precmd_pepe_osc7(){ printf '\\033]7;file://localhost%s\\033\\134' "$PWD" }; typeset -ga precmd_functions; precmd_functions+=(precmd_pepe_osc7)${clearLine}\n`;
     } else if (shell.includes('tcsh') || shell.includes('csh')) {
       // csh / tcsh — alias precmd 는 tcsh 기능.
-      cmd = ` alias precmd 'printf "\\033]7;file://localhost%s\\033\\134" "$cwd"'\n`;
+      cmd = ` alias precmd 'printf "\\033]7;file://localhost%s\\033\\134" "$cwd"'${clearLine}\n`;
     } else if (shell.includes('bash') || shell.endsWith('/sh') || shell === 'sh') {
-      cmd = ` PROMPT_COMMAND='printf "\\033]7;file://localhost%s\\033\\134" "$PWD"'\n`;
+      cmd = ` PROMPT_COMMAND='printf "\\033]7;file://localhost%s\\033\\134" "$PWD"'${clearLine}\n`;
     } else {
       // 지원 안 하는 셸 (fish 등) — 조용히 무시
       return;
