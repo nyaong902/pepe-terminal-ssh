@@ -146,6 +146,10 @@ class SSHBridge extends EventEmitter {
       });
     });
     stage('forwardOut done');
+    // sock 스트림에도 error 핸들러 — 미처리 시 main 프로세스 크래시
+    sock.on('error', (e: any) => {
+      console.log(`[jump-${panelId.slice(-6)}] tunnel sock error:`, e?.message || e);
+    });
 
     // 3. 그 소켓 위에 두번째 SSH Client 연결
     //    점프 타겟이 Solaris/레거시 OpenSSH 등 구버전일 수 있어서 기본 알고리즘 외
@@ -159,12 +163,20 @@ class SSHBridge extends EventEmitter {
       hmac: ssh2Constants.SUPPORTED_MAC,
     };
     const jumpConn = new Client();
+    // 영구 에러 핸들러 — handshake 이후 tunnel 이 끊겨도 uncaught exception 안 나게.
+    // 에러 발생 시 해당 panel 로 error 메시지 전달.
+    jumpConn.on('error', (e: any) => {
+      console.log(`[jump-${panelId.slice(-6)}] jumpConn error:`, e?.message || e);
+      try { this.emit('message', { type: 'error', panelId, error: `점프 연결 오류: ${e?.message || String(e)}` }); } catch {}
+    });
     await new Promise<void>((resolve, reject) => {
       const onReady = () => { cleanup(); resolve(); };
       const onErr = (e: any) => { cleanup(); reject(e); };
-      const cleanup = () => { jumpConn.removeListener('ready', onReady); jumpConn.removeListener('error', onErr); };
+      // 영구 error 핸들러는 위에서 이미 걸었으니 여기선 한번만 reject 용으로 래핑
+      const wrappedErr = (e: any) => onErr(e);
+      const cleanup = () => { jumpConn.removeListener('ready', onReady); jumpConn.removeListener('error', wrappedErr); };
       jumpConn.once('ready', onReady);
-      jumpConn.once('error', onErr);
+      jumpConn.once('error', wrappedErr);
       jumpConn.connect({
         sock,
         username: jumpUser,
@@ -247,6 +259,15 @@ class SSHBridge extends EventEmitter {
         } catch {
           this.emit('message', { type: 'data', panelId, data: data.toString('utf8') });
         }
+      });
+
+      // stream error 핸들러 — 미등록 시 unhandled exception → main 프로세스 크래시.
+      stream.on('error', (e: any) => {
+        console.log(`[shell-${panelId.slice(-6)}] stream error:`, e?.message || e);
+        // close 이벤트도 뒤이어 오므로 여기선 따로 정리 안 함
+      });
+      stream.stderr?.on?.('error', (e: any) => {
+        console.log(`[shell-${panelId.slice(-6)}] stderr error:`, e?.message || e);
       });
 
       stream.on('close', () => {

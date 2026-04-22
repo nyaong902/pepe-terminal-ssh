@@ -29,6 +29,18 @@ let sessionsData: SessionsData = { folders: [], sessions: [] };
 const connectedPanels = new Set<string>();
 const connectingPanels = new Set<string>();
 
+// Safety net — ssh2 같은 라이브러리에서 뒤늦게 던지는 stray error 로 앱 전체가
+// 다이얼로그와 함께 죽지 않도록 uncaught 를 로깅만 하고 삼킨다.
+// 치명적 원인은 소스에서 제대로 처리해야 하지만, 최소한 사용자 경험 보호용.
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err?.stack || err);
+  try { mainWindow?.webContents.send('debug:log', `[uncaughtException] ${err?.message || err}`); } catch {}
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+  try { mainWindow?.webContents.send('debug:log', `[unhandledRejection] ${(reason as any)?.message || reason}`); } catch {}
+});
+
 // 커맨드라인에서 전달된 초기 경로 (탐색기 우클릭 → "터미널에서 열기")
 function getStartupCwd(): string | null {
   // 1) 커맨드라인 인자에서 경로 탐색
