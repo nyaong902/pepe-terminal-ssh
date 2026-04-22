@@ -227,6 +227,14 @@ function App() {
   const [broadcastScope, setBroadcastScope] = useState<'current' | 'visible' | 'connected'>('current');
   const [broadcastShowHistory, setBroadcastShowHistory] = useState(false);
   const [broadcastHistoryIdx, setBroadcastHistoryIdx] = useState(-1);
+  // 히스토리 드롭다운에서 방향키로 이동한 항목이 보이게 스크롤 따라오기
+  useEffect(() => {
+    if (!broadcastShowHistory || broadcastHistoryIdx < 0) return;
+    const active = document.querySelector('.broadcast-history-dropdown .broadcast-history-item.active');
+    if (active instanceof HTMLElement) {
+      active.scrollIntoView({ block: 'nearest' });
+    }
+  }, [broadcastHistoryIdx, broadcastShowHistory]);
   const [splitSessionPicker, setSplitSessionPicker] = useState<{ dir: 'row' | 'column'; sessions: { sessionId: string; sessionName: string; host: string; termId: string }[]; srcTermId?: string } | null>(null);
   const [remoteTreeWidth, setRemoteTreeWidth] = useState<number>(240);
   const remoteTreeWidthLoadedRef = useRef(false);
@@ -335,7 +343,7 @@ function App() {
     if (broadcastNoticeTimer.current) clearTimeout(broadcastNoticeTimer.current);
     broadcastNoticeTimer.current = setTimeout(() => setBroadcastNotice(null), 2500);
   };
-  const sendBroadcast = (scope: 'current' | 'visible' | 'connected', override?: { raw: string; label?: string }) => {
+  const sendBroadcast = (scope: 'current' | 'visible' | 'connected', override?: { raw: string; label?: string }, opts?: { keepFocusOnInput?: boolean }) => {
     let text: string;
     let label: string;
     if (override) {
@@ -364,6 +372,16 @@ function App() {
     flashBroadcastNotice(`${label} → ${targets.length}개 세션 전송`, 'ok');
     // 전송 후 입력창 비우기 (override는 제어 문자라 제외)
     if (!override) setBroadcastText('');
+    // 포커스 복귀: 기본은 활성 터미널로, 일괄작업창에서 전송한 경우엔 입력창 유지
+    setTimeout(() => {
+      if (opts?.keepFocusOnInput) {
+        const inp = document.querySelector('.broadcast-input') as HTMLInputElement | null;
+        inp?.focus();
+      } else {
+        const atid = getActiveTermId();
+        if (atid) focusTerm(atid);
+      }
+    }, 0);
   };
 
   const handleThemeChange = (name: string) => {
@@ -1539,6 +1557,13 @@ function App() {
             onConnectDrop={handleConnectDrop}
             onDuplicateSession={handleDuplicateSession}
             availableShells={availableShells}
+            treeWidth={remoteTreeWidth}
+            onTreeWidthChange={w => {
+              setRemoteTreeWidth(w);
+              if (remoteTreeWidthLoadedRef.current) { try { (window as any).api?.setUIPrefs?.({ remoteTreeWidth: w }); } catch {} }
+            }}
+            onOpenRemoteFile={handleOpenRemoteFile}
+            onAttachToClaude={handleAttachToClaude}
           />
         )}
       </div>
@@ -1582,16 +1607,16 @@ function App() {
                   setBroadcastHistoryIdx(prev); setBroadcastText(broadcastHistory[prev]);
                   return;
                 }
-                if (e.key === 'Enter') { e.preventDefault(); setBroadcastShowHistory(false); sendBroadcast(broadcastScope); return; }
+                if (e.key === 'Enter') { e.preventDefault(); setBroadcastShowHistory(false); sendBroadcast(broadcastScope, undefined, { keepFocusOnInput: true }); return; }
                 if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
                   if (e.key === 'c' || e.key === 'C') {
                     const inp = e.currentTarget as HTMLInputElement;
                     if (inp.selectionStart !== inp.selectionEnd) return;
                     e.preventDefault();
-                    sendBroadcast(broadcastScope, { raw: '\x03', label: '^C' });
+                    sendBroadcast(broadcastScope, { raw: '\x03', label: '^C' }, { keepFocusOnInput: true });
                   } else if (e.key === 'd' || e.key === 'D') {
                     e.preventDefault();
-                    sendBroadcast(broadcastScope, { raw: '\x04', label: '^D' });
+                    sendBroadcast(broadcastScope, { raw: '\x04', label: '^D' }, { keepFocusOnInput: true });
                   }
                 }
               }}
@@ -1620,6 +1645,7 @@ function App() {
             <span>↵</span>
           </label>
           <button className="broadcast-btn" onClick={() => sendBroadcast(broadcastScope)} title="텍스트 전송 (Enter)">전송</button>
+          <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x1b[A', label: '↑' })} title="위 방향키 (이전 명령) 전송">↑</button>
           <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x03', label: '^C' })} title="Ctrl+C (SIGINT) 전송">^C</button>
           <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x04', label: '^D' })} title="Ctrl+D (EOF) 전송">^D</button>
           {broadcastNotice && (
