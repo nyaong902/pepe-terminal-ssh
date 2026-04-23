@@ -774,6 +774,27 @@ function walkXshellDir(dir: string, relPath: string, folders: Folder[], sessions
 
 // ── 파일 탐색기 IPC ──
 
+// 로컬 파일 다중 선택 다이얼로그 — 일괄 파일전송 모달 등에서 사용
+ipcMain.handle('dialog:pick-files', async (_e, { multi }: { multi?: boolean }) => {
+  if (!mainWindow) return { paths: [] };
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: multi ? '파일 선택 (다중)' : '파일 선택',
+    properties: multi ? ['openFile', 'multiSelections'] : ['openFile'],
+  });
+  if (result.canceled) return { paths: [] };
+  return { paths: result.filePaths };
+});
+
+ipcMain.handle('dialog:pick-folder', async () => {
+  if (!mainWindow) return { path: null };
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '폴더 선택',
+    properties: ['openDirectory'],
+  });
+  if (result.canceled || result.filePaths.length === 0) return { path: null };
+  return { path: result.filePaths[0] };
+});
+
 ipcMain.handle('fe:list-dir', async (_e, { mode, termId, dirPath }: { mode: string; termId?: string; dirPath: string }) => {
   try {
     const bridge = getSSHBridge();
@@ -909,14 +930,65 @@ ipcMain.handle('sftp:download', async (_e, { panelId, remotePath, isDir }: { pan
   }
 });
 
-ipcMain.handle('sftp:upload', async (_e, { panelId, remotePath, kind }: { panelId: string; remotePath: string; kind?: 'file' | 'folder' }) => {
+// 다중 파일 다운로드 — 한번 폴더 고른 뒤 모든 항목을 그 폴더 안에 저장
+ipcMain.handle('sftp:download-multi', async (_e, { panelId, items }: { panelId: string; items: { path: string; isDir: boolean }[] }) => {
+  if (!mainWindow || !items || items.length === 0) return null;
+  const bridge = getSSHBridge();
+  const pick = await dialog.showOpenDialog(mainWindow, {
+    title: `${items.length}개 항목 다운로드 — 저장 폴더 선택`,
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (pick.canceled || pick.filePaths.length === 0) return null;
+  const parentDir = pick.filePaths[0];
+  const results: { path: string; success: boolean; error?: string }[] = [];
+  for (const item of items) {
+    const baseName = item.path.split('/').filter(Boolean).pop() || 'download';
+    const localDst = path.join(parentDir, baseName);
+    try {
+      await bridge.handleTransfer(
+        { mode: 'remote', termId: panelId, path: item.path },
+        { mode: 'local', path: localDst },
+        baseName,
+      );
+      results.push({ path: item.path, success: true });
+    } catch (err: any) {
+      results.push({ path: item.path, success: false, error: String(err) });
+    }
+  }
+  const okCount = results.filter(r => r.success).length;
+  return { success: okCount > 0, total: items.length, ok: okCount, results, localDir: parentDir };
+});
+
+ipcMain.handle('sftp:upload', async (_e, { panelId, remotePath, kind }: { panelId: string; remotePath: string; kind?: 'file' | 'folder' | 'multi-file' }) => {
   if (!mainWindow) return null;
   const isFolder = kind === 'folder';
+  const isMulti = kind === 'multi-file';
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: isFolder ? '업로드할 폴더 선택' : '업로드할 파일 선택',
-    properties: [isFolder ? 'openDirectory' : 'openFile'],
+    title: isFolder ? '업로드할 폴더 선택' : (isMulti ? '업로드할 파일 선택 (다중)' : '업로드할 파일 선택'),
+    properties: isFolder ? ['openDirectory'] : (isMulti ? ['openFile', 'multiSelections'] : ['openFile']),
   });
   if (result.canceled || result.filePaths.length === 0) return null;
+  // 다중 파일 업로드 — 각 파일을 순차 업로드
+  if (isMulti) {
+    const bridge = getSSHBridge();
+    const results: { filename: string; success: boolean; error?: string }[] = [];
+    for (const localPath of result.filePaths) {
+      const filename = localPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
+      const fullRemote = remotePath.endsWith('/') ? remotePath + filename : remotePath + '/' + filename;
+      try {
+        await bridge.handleTransfer(
+          { mode: 'local', path: localPath },
+          { mode: 'remote', termId: panelId, path: fullRemote },
+          filename,
+        );
+        results.push({ filename, success: true });
+      } catch (err: any) {
+        results.push({ filename, success: false, error: String(err) });
+      }
+    }
+    const okCount = results.filter(r => r.success).length;
+    return { success: okCount > 0, total: result.filePaths.length, ok: okCount, results };
+  }
   const localPath = result.filePaths[0];
   const filename = localPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
   const fullRemote = remotePath.endsWith('/') ? remotePath + filename : remotePath + '/' + filename;

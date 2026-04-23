@@ -2998,6 +2998,14 @@ html, body {
 .remote-file-item[data-cat="data"] .remote-file-name    { color: #d9b84c; }
 .remote-file-item[data-cat="other"] .remote-file-name   { color: #c5c5c5; }
 
+/* 파일 다중 선택 강조 */
+.remote-file-item.selected {
+  background: #2b4e74;
+}
+.remote-file-item.selected:hover {
+  background: #315a84;
+}
+
 .remote-file-loading {
   padding: 12px;
   color: #888;

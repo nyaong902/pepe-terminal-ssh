@@ -795,17 +795,30 @@ class SSHBridge extends EventEmitter {
     jumpOpts?: { host: string; user?: string; port?: number; password?: string }
   ): Promise<void> {
     if (this.clients.has(connId)) return;
+    const log = (msg: string) => {
+      console.log(`[sftp-connect-${connId}] ${msg}`);
+      try { require('electron').BrowserWindow.getAllWindows()[0]?.webContents.send('debug:log', `[sftp-connect] ${msg}`); } catch {}
+    };
+    log(`start host=${host} user=${username} jump=${jumpOpts?.host || '(none)'}`);
     return new Promise((resolve, reject) => {
       const primaryConn = new Client();
-      primaryConn.on('error', (err: any) => reject(err));
+      primaryConn.on('error', (err: any) => {
+        log(`primary error: ${err?.message || err}`);
+        reject(err);
+      });
+      // 비밀번호 미저장 세션 대비 keyboard-interactive 도 허용
+      primaryConn.on('keyboard-interactive', (_n: any, _i: any, _l: any, prompts: any[], finish: (r: string[]) => void) => {
+        if (auth?.type === 'password' && auth.password) finish([auth.password]);
+        else finish(prompts.map(() => ''));
+      });
       primaryConn.on('ready', async () => {
+        log(`primary ready`);
         if (!jumpOpts?.host) {
-          // 점프 없음 — primary 자체를 연결로 저장
           this.clients.set(connId, { conn: primaryConn });
+          log(`no jump, saved as ${connId}`);
           resolve();
           return;
         }
-        // ProxyJump — 점프 타겟에 직결 후 그 Client 를 SFTP 용으로 저장
         try {
           const jumpHost = jumpOpts.host;
           const jumpUser = jumpOpts.user || 'root';
@@ -813,18 +826,23 @@ class SSHBridge extends EventEmitter {
           const authCfg: any = {};
           if (jumpOpts.password) {
             authCfg.password = jumpOpts.password;
+            log(`jump auth: password`);
           } else {
+            log(`jump auth: reading key from primary...`);
             const keyBuf = await this._readSshKeyFromConn(primaryConn);
             if (!keyBuf) throw new Error(`${host} 의 ~/.ssh/ 에서 사용 가능한 키 미발견`);
             authCfg.privateKey = keyBuf;
+            log(`jump auth: key read (${keyBuf.length}B)`);
           }
+          log(`forwardOut → ${jumpHost}:${jumpPort}`);
           const sock: any = await new Promise((res, rej) => {
             primaryConn.forwardOut('127.0.0.1', 0, jumpHost, jumpPort, (e: any, s: any) => e ? rej(e) : res(s));
           });
-          sock.on('error', (e: any) => console.log(`[sftp-jump-${connId}] sock error:`, e?.message));
+          sock.on('error', (e: any) => log(`sock error: ${e?.message}`));
+          log(`forwardOut done, opening jump SSH`);
           const ssh2Constants = require('ssh2/lib/protocol/constants');
           const jumpConn = new Client();
-          jumpConn.on('error', (e: any) => console.log(`[sftp-jump-${connId}] jumpConn error:`, e?.message));
+          jumpConn.on('error', (e: any) => log(`jumpConn error: ${e?.message}`));
           await new Promise<void>((res, rej) => {
             const onReady = () => { cleanup(); res(); };
             const onErr = (e: any) => { cleanup(); rej(e); };
@@ -845,20 +863,23 @@ class SSHBridge extends EventEmitter {
               readyTimeout: 30000,
             } as any);
           });
-          // jumpConn 을 SFTP 용 conn 으로 저장, primary 는 transport 유지
+          log(`jumpConn ready`);
           this.clients.set(connId, { conn: jumpConn, primaryConn });
           resolve();
-        } catch (err) {
+        } catch (err: any) {
+          log(`jump setup FAILED: ${err?.message || err}`);
           try { primaryConn.end(); } catch {}
           reject(err);
         }
       });
-      const cfg: any = { host, port, username, tryKeyboard: false, readyTimeout: 15000 };
+      // tryKeyboard: true 로 확장 — 비밀번호 모저장 세션 등 대비
+      const cfg: any = { host, port, username, tryKeyboard: true, readyTimeout: 15000 };
       if (auth?.type === 'password') {
         cfg.password = auth.password;
       } else if (auth?.type === 'key') {
-        try { cfg.privateKey = fs.readFileSync(auth.keyPath); } catch {}
+        try { cfg.privateKey = fs.readFileSync(auth.keyPath); } catch (e: any) { log(`key read fail: ${e?.message}`); }
       }
+      log(`primary connect...`);
       primaryConn.connect(cfg);
     });
   }

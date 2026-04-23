@@ -1,5 +1,5 @@
 // src/components/RemoteFileTree.tsx
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 
 // 확장자 → 카테고리. CSS 에서 data-cat 으로 색상 매칭.
 const EXT_CAT: Record<string, string> = {
@@ -101,6 +101,10 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
   const [pathInput, setPathInput] = useState<string>(cached?.pathInput || '');
   const [promptModal, setPromptModal] = useState<{ title: string; value: string; onSubmit: (v: string) => void } | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; node: TreeNode } | null>(null);
+  // 다중 선택 (ctrl/cmd+click, shift+click). 파일만 선택 대상.
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  // 범위 선택용 anchor
+  const anchorPathRef = useRef<string | null>(null);
 
   // 컨텍스트 메뉴 외부 클릭/ESC 닫기
   useEffect(() => {
@@ -256,22 +260,72 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
     }
   };
 
+  // 현재 렌더되는 파일 경로 flat 리스트 (shift+click 범위 선택용, 폴더 제외)
+  const visibleFilePaths = useMemo<string[]>(() => {
+    const result: string[] = [];
+    const walk = (node: TreeNode | null | undefined) => {
+      if (!node) return;
+      if (!node.isDir) result.push(node.path);
+      if (node.isDir && !collapsed.has(node.path) && node.children) {
+        for (const c of node.children) walk(c);
+      }
+    };
+    if (root?.children) for (const c of root.children) walk(c);
+    return result;
+  }, [root, collapsed]);
+
   const renderNode = (node: TreeNode, depth: number): React.ReactNode => {
     const isCollapsed = collapsed.has(node.path);
     const cat = node.isDir ? 'dir' : fileCategory(node.name);
+    const isSelected = !node.isDir && selectedPaths.has(node.path);
     return (
       <React.Fragment key={node.path}>
         <div
-          className={`remote-file-item ${node.isDir ? 'folder' : 'file'}`}
+          className={`remote-file-item ${node.isDir ? 'folder' : 'file'} ${isSelected ? 'selected' : ''}`}
           data-cat={cat}
           style={{ paddingLeft: 8 + depth * 14 }}
-          onClick={() => {
-            if (node.isDir) toggleFolder(node);
-            else onOpenFile(termId, node.path, node.name);
+          onClick={(e) => {
+            if (node.isDir) {
+              // 폴더는 기존처럼 단일 클릭으로 확장/축소
+              toggleFolder(node);
+              return;
+            }
+            // 파일: 선택만 (열기는 더블클릭). Ctrl/Cmd=토글, Shift=범위, 일반=단일.
+            if (e.shiftKey && anchorPathRef.current) {
+              const startIdx = visibleFilePaths.indexOf(anchorPathRef.current);
+              const endIdx = visibleFilePaths.indexOf(node.path);
+              if (startIdx >= 0 && endIdx >= 0) {
+                const [lo, hi] = startIdx <= endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+                setSelectedPaths(new Set(visibleFilePaths.slice(lo, hi + 1)));
+              }
+              return;
+            }
+            if (e.ctrlKey || e.metaKey) {
+              setSelectedPaths(prev => {
+                const next = new Set(prev);
+                if (next.has(node.path)) next.delete(node.path); else next.add(node.path);
+                return next;
+              });
+              anchorPathRef.current = node.path;
+              return;
+            }
+            // 단일 선택
+            setSelectedPaths(new Set([node.path]));
+            anchorPathRef.current = node.path;
+          }}
+          onDoubleClick={(e) => {
+            if (node.isDir) return; // 폴더는 더블클릭 무시 (단일클릭으로 이미 처리)
+            e.stopPropagation();
+            onOpenFile(termId, node.path, node.name);
           }}
           onContextMenu={(e) => {
             e.preventDefault();
             e.stopPropagation();
+            // 오른쪽 클릭 시 현재 노드가 선택에 없으면 단일 선택으로 리셋 (일반적 UX)
+            if (!node.isDir && !selectedPaths.has(node.path)) {
+              setSelectedPaths(new Set([node.path]));
+              anchorPathRef.current = node.path;
+            }
             setCtxMenu({ x: e.clientX, y: e.clientY, node });
           }}
         >
@@ -334,11 +388,14 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
           title="Enter로 이동"
         />
         <button className="remote-file-path-go" onClick={() => navigateTo(pathInput)} title="이동">↵</button>
-        <button className="remote-file-path-up" onClick={() => {
+        <button className="remote-file-path-up" onClick={async () => {
           if (!root) return;
-          const parent = root.path.replace(/\/[^/]+\/?$/, '') || '/';
-          navigateTo(parent);
-        }} title="상위 폴더">▲</button>
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const r = await (window as any).api?.sftpUpload?.(termId, root.path, 'multi-file');
+            if (r?.success) navigateTo(root.path);
+          } catch {}
+        }} title="현재 경로에 파일 업로드 (다중선택)">⬆</button>
         <button className="remote-file-path-home" onClick={() => {
           if (!root) return;
           navigateTo(root.path);
@@ -347,13 +404,50 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
       <div className="remote-file-list">
         {root.children && root.children.map(c => renderNode(c, 0))}
       </div>
-      {ctxMenu && (
+      {ctxMenu && (() => {
+        // 다중 선택 상태 감지 — 현재 우클릭 대상이 선택 집합에 포함돼 있고, 크기 > 1 일 때
+        const isMultiContext = !ctxMenu.node.isDir && selectedPaths.size > 1 && selectedPaths.has(ctxMenu.node.path);
+        return (
         <div
           className="remote-file-ctx-menu"
           style={{ left: ctxMenu.x, top: ctxMenu.y }}
           onClick={e => e.stopPropagation()}
           onContextMenu={e => e.preventDefault()}
         >
+          {isMultiContext ? (
+            <>
+              <div className="context-menu-label">{selectedPaths.size}개 파일 선택됨</div>
+              <div className="remote-file-ctx-item" onClick={async () => {
+                const items = [...selectedPaths].map(p => ({ path: p, isDir: false }));
+                setCtxMenu(null);
+                try {
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  await (window as any).api?.sftpDownloadMulti?.(termId, items);
+                } catch {}
+              }}>💾 여러 파일 다운로드 ({selectedPaths.size}개)</div>
+              <div className="remote-file-ctx-item danger" onClick={async () => {
+                const paths = [...selectedPaths];
+                setCtxMenu(null);
+                if (!confirm(`${paths.length}개 파일을 삭제하시겠습니까?\n\n${paths.slice(0, 10).join('\n')}${paths.length > 10 ? `\n... (+${paths.length - 10}개)` : ''}`)) return;
+                let ok = 0, fail = 0;
+                for (const p of paths) {
+                  try {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    const r = await (window as any).api?.feDelete?.('remote', p, termId);
+                    if (r?.success) ok++; else fail++;
+                  } catch { fail++; }
+                }
+                if (fail > 0) alert(`삭제 결과: 성공 ${ok}, 실패 ${fail}`);
+                setSelectedPaths(new Set());
+                if (root) navigateTo(root.path);
+              }}>🗑 여러 파일 삭제 ({selectedPaths.size}개)</div>
+              <div className="remote-file-ctx-item" onClick={() => {
+                setSelectedPaths(new Set());
+                setCtxMenu(null);
+              }}>❎ 선택 해제</div>
+            </>
+          ) : (
+            <>
           {!ctxMenu.node.isDir && (
             <div className="remote-file-ctx-item" onClick={() => {
               onOpenFile(termId, ctxMenu.node.path, ctxMenu.node.name);
@@ -372,9 +466,6 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
             try {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               await (window as any).api?.sftpDownload?.(termId, node.path, node.isDir);
-              if (node.isDir) {
-                // 폴더 다운로드 완료 후 갱신할 필요는 없음 (원격 변경 아님)
-              }
             } catch {}
           }}>💾 다운로드{ctxMenu.node.isDir ? ' (폴더 재귀)' : ''}</div>
           {ctxMenu.node.isDir && (
@@ -388,6 +479,15 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
                   if (r?.success) navigateTo(node.path);
                 } catch {}
               }}>📥 파일 업로드</div>
+              <div className="remote-file-ctx-item" onClick={async () => {
+                const node = ctxMenu.node;
+                setCtxMenu(null);
+                try {
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const r = await (window as any).api?.sftpUpload?.(termId, node.path, 'multi-file');
+                  if (r?.success) navigateTo(node.path);
+                } catch {}
+              }}>📥 파일 업로드 (다중선택)</div>
               <div className="remote-file-ctx-item" onClick={async () => {
                 const node = ctxMenu.node;
                 setCtxMenu(null);
@@ -411,8 +511,11 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
             } catch {}
             setCtxMenu(null);
           }}>📋 경로 복사</div>
+            </>
+          )}
         </div>
-      )}
+        );
+      })()}
       {promptModal && (
         <div className="path-prompt-backdrop" onClick={() => setPromptModal(null)}>
           <div className="path-prompt-modal" onClick={e => e.stopPropagation()}>

@@ -11,7 +11,7 @@ import { FileEditor } from './components/FileEditor';
 import { ClaudeChat } from './components/ClaudeChat';
 import { QuickConnectBar, QuickConnectResult } from './components/QuickConnectDialog';
 import { StatusBar } from './components/StatusBar';
-import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect, toggleTreeVisibleForTerm, startInitialConnectWatchdog } from './components/TerminalPanel';
+import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect, toggleTreeVisibleForTerm, startInitialConnectWatchdog, getCurrentPwdForTerm } from './components/TerminalPanel';
 import { getTerminalSettings, saveTerminalSettings, TerminalSettings } from './utils/terminalSettings';
 import { loadKeybindings, matchKeybinding, getKeybindings, DEFAULT_KEYBINDINGS, KEYBINDING_LABELS, keyEventToCombo, setKeybindingListening } from './utils/keybindings';
 import { getThemeList } from './utils/terminalThemes';
@@ -225,8 +225,39 @@ function App() {
   }, [showBroadcast]);
   const [broadcastText, setBroadcastText] = useState('');
   const [broadcastAppendNewline, setBroadcastAppendNewline] = useState(true);
-  const [broadcastScope, setBroadcastScope] = useState<'current' | 'visible' | 'connected'>('current');
+  const [broadcastScope, setBroadcastScope] = useState<'current' | 'visible' | 'connected'>('visible');
   const [broadcastShowHistory, setBroadcastShowHistory] = useState(false);
+  // 일괄 파일 전송 모달
+  const [showBcastFileXfer, setShowBcastFileXfer] = useState(false);
+  const [bcastXferPath, setBcastXferPath] = useState(''); // 비우면 세션별 현재 경로 사용
+  // source 가 있으면 그 termId(원격 서버) 에서 읽어오는 파일, 없으면 로컬 path
+  const [bcastXferFiles, setBcastXferFiles] = useState<{ path: string; isFolder: boolean; sourceTermId?: string; sourceLabel?: string }[]>([]);
+  const [bcastXferInProgress, setBcastXferInProgress] = useState(false);
+  const [bcastXferLog, setBcastXferLog] = useState<string[]>([]);
+  // 원격 소스 picker (일괄 파일 전송 서브 모달)
+  const [remotePickerOpen, setRemotePickerOpen] = useState(false);
+  const [remotePickerTermId, setRemotePickerTermId] = useState<string>('');
+  const [remotePickerPath, setRemotePickerPath] = useState<string>('');
+  const [remotePickerFiles, setRemotePickerFiles] = useState<{ name: string; isDir: boolean }[]>([]);
+  const [remotePickerSelected, setRemotePickerSelected] = useState<Set<string>>(new Set()); // 이름만 저장
+  const [remotePickerLoading, setRemotePickerLoading] = useState(false);
+
+  // 원격 picker 가 열리거나 termId 가 바뀌면 파일 리스트 자동 로드
+  useEffect(() => {
+    if (!remotePickerOpen || !remotePickerTermId || !remotePickerPath) return;
+    let cancelled = false;
+    (async () => {
+      setRemotePickerLoading(true);
+      try {
+        const r: any = await (window as any).api?.feListDir?.('remote', remotePickerPath, remotePickerTermId);
+        if (!cancelled) setRemotePickerFiles(r?.files || []);
+      } catch {
+        if (!cancelled) setRemotePickerFiles([]);
+      }
+      if (!cancelled) setRemotePickerLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [remotePickerOpen, remotePickerTermId]);
   const [broadcastHistoryIdx, setBroadcastHistoryIdx] = useState(-1);
   // 히스토리 드롭다운에서 방향키로 이동한 항목이 보이게 스크롤 따라오기
   useEffect(() => {
@@ -956,7 +987,7 @@ function App() {
 
   const handleConnectSession = (sessionId: string, sessionName: string, _targetPanelId?: string | null, sessionTheme?: string, sessionFontFamily?: string, sessionFontSize?: number, sessionScrollback?: number) => {
     if (!activeTab) return;
-    // 파일 전송 탭이면 SFTP 직접 연결하여 파일 탐색기에 추가
+    // 파일 전송 탭이면 SFTP 직접 연결하여 파일 탐색기에 추가 (점프 호스트 설정도 반영)
     if (activeTab.type === 'fileExplorer') {
       (async () => {
         try {
@@ -964,12 +995,23 @@ function App() {
           const allSessions = data?.sessions ?? data ?? [];
           const sess = allSessions.find((s: any) => s.id === sessionId);
           if (!sess) return;
+          console.log('[fe-transfer dblclick] session:', { name: sess.name, host: sess.host, jumpTargetHost: sess.jumpTargetHost });
           const connId = `sftp-fe-${Date.now()}`;
-          const result = await (window as any).api.feSftpConnect?.(connId, sess.host, sess.port || 22, sess.username, sess.auth);
+          const jumpOpts = sess.jumpTargetHost?.trim()
+            ? { host: sess.jumpTargetHost.trim(), user: sess.jumpTargetUser || 'root', port: Number(sess.jumpTargetPort) || 22, password: sess.jumpTargetPassword || undefined }
+            : undefined;
+          const displayHost = jumpOpts ? jumpOpts.host : sess.host;
+          const result = await (window as any).api.feSftpConnect?.(connId, sess.host, sess.port || 22, sess.username, sess.auth, jumpOpts);
           if (result?.success) {
-            window.dispatchEvent(new CustomEvent('fe-sftp-connected', { detail: { connId, sessionName, host: sess.host } }));
+            window.dispatchEvent(new CustomEvent('fe-sftp-connected', { detail: { connId, sessionName, host: displayHost } }));
+          } else {
+            const msg = result?.error || '알 수 없는 오류';
+            console.error('[fe-sftp-connect dblclick] failed:', msg);
+            alert(`파일 전송 연결 실패 (${sessionName})\n\n${msg}`);
           }
-        } catch {}
+        } catch (err: any) {
+          console.error('[fe-sftp-connect dblclick] exception:', err);
+        }
       })();
       return;
     }
@@ -1512,19 +1554,24 @@ function App() {
             const allSessions = data?.sessions ?? data ?? [];
             const sess = allSessions.find((s: any) => s.id === sessionId);
             if (!sess) return;
+            console.log('[fe-transfer] selected session:', { name: sess.name, host: sess.host, jumpTargetHost: sess.jumpTargetHost, jumpTargetUser: sess.jumpTargetUser });
             const connId = `sftp-fe-${Date.now()}`;
             const jumpOpts = sess.jumpTargetHost?.trim()
               ? { host: sess.jumpTargetHost.trim(), user: sess.jumpTargetUser || 'root', port: Number(sess.jumpTargetPort) || 22, password: sess.jumpTargetPassword || undefined }
               : undefined;
-            // 파일 전송 탭 표시명: 점프 타겟이 있으면 그 호스트로 표기
             const displayHost = jumpOpts ? jumpOpts.host : sess.host;
             const result = await (window as any).api.feSftpConnect?.(connId, sess.host, sess.port || 22, sess.username, sess.auth, jumpOpts);
             if (result?.success) {
               window.dispatchEvent(new CustomEvent('fe-sftp-connected', { detail: { connId, sessionName, host: displayHost } }));
-            } else if (result?.error) {
-              console.error('[fe-sftp-connect] failed:', result.error);
+            } else {
+              const msg = result?.error || '알 수 없는 오류';
+              console.error('[fe-sftp-connect] failed:', msg);
+              alert(`파일 전송 연결 실패 (${sessionName})\n\n${msg}\n\nDevTools Console 에 [sftp-connect] 로그 확인 권장.`);
             }
-          } catch {}
+          } catch (err: any) {
+            console.error('[fe-sftp-connect] exception:', err);
+            alert(`파일 전송 연결 예외: ${err?.message || err}`);
+          }
         }}
       />
       {/* 파일 트리는 이제 각 TerminalPanel 내부에서 mini-tab 별로 렌더링됨 (Ctrl+Shift+E 로 토글). */}
@@ -1655,7 +1702,6 @@ function App() {
             onChange={e => setBroadcastScope(e.target.value as any)}
             title="전송 대상"
           >
-            <option value="current">현재 세션 ({collectBroadcastTargets('current').length})</option>
             <option value="visible">보이는 탭 ({collectBroadcastTargets('visible').length})</option>
             <option value="connected">연결된 세션 ({collectBroadcastTargets('connected').length})</option>
           </select>
@@ -1722,6 +1768,7 @@ function App() {
             <span>↵</span>
           </label>
           <button className="broadcast-btn" onClick={() => sendBroadcast(broadcastScope)} title="텍스트 전송 (Enter)">전송</button>
+          <button className="broadcast-btn" onClick={() => { setBcastXferFiles([]); setBcastXferPath(''); setBcastXferLog([]); setShowBcastFileXfer(true); }} title="여러 세션에 파일/폴더 일괄 업로드">📤 파일전송</button>
           <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x1b[A', label: '↑' })} title="위 방향키 (이전 명령) 전송">↑</button>
           <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x03', label: '^C' })} title="Ctrl+C (SIGINT) 전송">^C</button>
           <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x04', label: '^D' })} title="Ctrl+D (EOF) 전송">^D</button>
@@ -2093,6 +2140,240 @@ function App() {
             </div>
             <div className="folder-picker-actions">
               <button onClick={() => setSplitSessionPicker(null)}>취소</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {remotePickerOpen && (
+        <div className="session-editor-backdrop" style={{ zIndex: 10000 }} onClick={() => setRemotePickerOpen(false)}>
+          <div className="session-editor" onClick={e => e.stopPropagation()} style={{ width: 580, maxHeight: '80vh', display: 'flex', flexDirection: 'column', zIndex: 10001 }}>
+            <h3>🌐 원격 파일 선택</h3>
+
+            <label style={{ fontSize: 12, color: '#bbb' }}>소스 세션</label>
+            <select value={remotePickerTermId} onChange={async (e) => {
+              const tid = e.target.value;
+              setRemotePickerTermId(tid);
+              const pwd = getCurrentPwdForTerm(tid) || '/';
+              setRemotePickerPath(pwd);
+              setRemotePickerSelected(new Set());
+              setRemotePickerLoading(true);
+              try {
+                const r: any = await (window as any).api?.feListDir?.('remote', pwd, tid);
+                setRemotePickerFiles(r?.files || []);
+              } catch { setRemotePickerFiles([]); }
+              setRemotePickerLoading(false);
+            }}>
+              {activeTab && collectAllSessions(activeTab.layout).filter(s => isTermConnected(s.termId)).map(s => (
+                <option key={s.termId} value={s.termId}>{getTermSessionInfo(s.termId)?.sessionName || s.sessionName}</option>
+              ))}
+            </select>
+
+            <label style={{ fontSize: 12, color: '#bbb', marginTop: 10 }}>경로</label>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <input type="text" value={remotePickerPath} onChange={e => setRemotePickerPath(e.target.value)}
+                onKeyDown={async (e) => {
+                  if (e.key === 'Enter') {
+                    setRemotePickerLoading(true);
+                    try { const r: any = await (window as any).api?.feListDir?.('remote', remotePickerPath, remotePickerTermId); setRemotePickerFiles(r?.files || []); } catch { setRemotePickerFiles([]); }
+                    setRemotePickerLoading(false);
+                  }
+                }}
+                style={{ flex: 1 }} />
+              <button onClick={async () => {
+                const parent = remotePickerPath.replace(/\/[^/]+\/?$/, '') || '/';
+                setRemotePickerPath(parent);
+                setRemotePickerSelected(new Set());
+                setRemotePickerLoading(true);
+                try { const r: any = await (window as any).api?.feListDir?.('remote', parent, remotePickerTermId); setRemotePickerFiles(r?.files || []); } catch { setRemotePickerFiles([]); }
+                setRemotePickerLoading(false);
+              }} title="상위 폴더">▲</button>
+              <button onClick={async () => {
+                setRemotePickerLoading(true);
+                try { const r: any = await (window as any).api?.feListDir?.('remote', remotePickerPath, remotePickerTermId); setRemotePickerFiles(r?.files || []); } catch { setRemotePickerFiles([]); }
+                setRemotePickerLoading(false);
+              }} title="새로고침">⟳</button>
+            </div>
+
+            <div style={{ flex: 1, minHeight: 200, maxHeight: 320, overflowY: 'auto', border: '1px solid #333', borderRadius: 4, marginTop: 8, background: '#161616' }}>
+              {remotePickerLoading ? (
+                <div style={{ color: '#888', fontSize: 12, padding: 16, textAlign: 'center' }}>로딩 중...</div>
+              ) : remotePickerFiles.length === 0 ? (
+                <div style={{ color: '#666', fontSize: 12, padding: 16, textAlign: 'center' }}>(비어있음 또는 경로 에러)</div>
+              ) : (
+                remotePickerFiles
+                  .filter(f => f.name !== '.' && f.name !== '..')
+                  .sort((a, b) => (a.isDir !== b.isDir) ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name))
+                  .map(f => (
+                    <div key={f.name} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 6px', cursor: 'pointer', background: remotePickerSelected.has(f.name) ? '#2b4e74' : 'transparent' }}
+                      onClick={() => {
+                        setRemotePickerSelected(prev => {
+                          const next = new Set(prev);
+                          if (next.has(f.name)) next.delete(f.name); else next.add(f.name);
+                          return next;
+                        });
+                      }}
+                      onDoubleClick={async () => {
+                        if (!f.isDir) return;
+                        const sep = remotePickerPath.endsWith('/') ? '' : '/';
+                        const newPath = remotePickerPath + sep + f.name;
+                        setRemotePickerPath(newPath);
+                        setRemotePickerSelected(new Set());
+                        setRemotePickerLoading(true);
+                        try { const r: any = await (window as any).api?.feListDir?.('remote', newPath, remotePickerTermId); setRemotePickerFiles(r?.files || []); } catch { setRemotePickerFiles([]); }
+                        setRemotePickerLoading(false);
+                      }}
+                    >
+                      <input type="checkbox" readOnly checked={remotePickerSelected.has(f.name)} />
+                      <span style={{ fontSize: 12 }}>{f.isDir ? '📁' : '📄'} {f.name}</span>
+                    </div>
+                  ))
+              )}
+            </div>
+            <div style={{ fontSize: 11, color: '#777', marginTop: 4 }}>
+              클릭: 선택 / 더블클릭: 폴더 진입. {remotePickerSelected.size}개 선택됨
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+              <button onClick={() => setRemotePickerOpen(false)}>닫기</button>
+              <button className="primary" disabled={remotePickerSelected.size === 0}
+                onClick={() => {
+                  const info = getTermSessionInfo(remotePickerTermId);
+                  const sessLabel = info?.sessionName || remotePickerTermId.slice(-6);
+                  const toAdd = [...remotePickerSelected].map(name => {
+                    const sep = remotePickerPath.endsWith('/') ? '' : '/';
+                    const fullPath = remotePickerPath + sep + name;
+                    const isFolder = remotePickerFiles.find(f => f.name === name)?.isDir || false;
+                    return { path: fullPath, isFolder, sourceTermId: remotePickerTermId, sourceLabel: sessLabel };
+                  });
+                  setBcastXferFiles(prev => [...prev, ...toAdd]);
+                  setRemotePickerOpen(false);
+                }}
+              >선택 항목 추가 ({remotePickerSelected.size}개)</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBcastFileXfer && (
+        <div className="session-editor-backdrop" onClick={() => !bcastXferInProgress && setShowBcastFileXfer(false)}>
+          <div className="session-editor" onClick={e => e.stopPropagation()} style={{ width: 620, maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}>
+            <h3>📤 일괄 파일 전송</h3>
+
+            <label style={{ fontSize: 12, color: '#bbb', marginTop: 8 }}>대상 세션</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <select value={broadcastScope} onChange={e => setBroadcastScope(e.target.value as any)} style={{ flex: 1 }}>
+                <option value="visible">보이는 세션 모두</option>
+                <option value="connected">연결된 세션 전체</option>
+              </select>
+              <span style={{ color: '#8ab', fontSize: 12 }}>{collectBroadcastTargets(broadcastScope).length}개</span>
+            </div>
+
+            <label style={{ fontSize: 12, color: '#bbb', marginTop: 12 }}>원격 경로 (비우면 각 세션의 현재 경로 사용)</label>
+            <input type="text" value={bcastXferPath} onChange={e => setBcastXferPath(e.target.value)}
+              placeholder="예: /tmp (선택사항)" />
+
+            <label style={{ fontSize: 12, color: '#bbb', marginTop: 12 }}>업로드할 파일/폴더</label>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+              <button onClick={async () => {
+                const r: any = await (window as any).api?.pickFiles?.(true);
+                if (r?.paths?.length) {
+                  setBcastXferFiles(prev => [...prev, ...r.paths.map((p: string) => ({ path: p, isFolder: false }))]);
+                }
+              }}>+ 로컬 파일</button>
+              <button onClick={async () => {
+                const r: any = await (window as any).api?.pickFolder?.();
+                if (r?.path) setBcastXferFiles(prev => [...prev, { path: r.path, isFolder: true }]);
+              }}>+ 로컬 폴더</button>
+              <button onClick={() => {
+                // 연결된 세션들 중 첫 번째 디폴트
+                if (!activeTab) return;
+                const allSess = collectAllSessions(activeTab.layout);
+                const connected = allSess.filter(s => isTermConnected(s.termId));
+                if (connected.length === 0) { alert('연결된 세션이 없습니다'); return; }
+                const firstTid = connected[0].termId;
+                setRemotePickerTermId(firstTid);
+                const pwd = getCurrentPwdForTerm(firstTid) || '/';
+                setRemotePickerPath(pwd);
+                setRemotePickerSelected(new Set());
+                setRemotePickerFiles([]);
+                setRemotePickerOpen(true);
+              }}>+ 원격 파일 (다른 서버)</button>
+              <button onClick={() => setBcastXferFiles([])} disabled={bcastXferFiles.length === 0}>모두 제거</button>
+            </div>
+            <div style={{ flex: 1, minHeight: 100, maxHeight: 220, overflowY: 'auto', border: '1px solid #333', borderRadius: 4, padding: 6, background: '#161616' }}>
+              {bcastXferFiles.length === 0 ? (
+                <div style={{ color: '#666', fontSize: 12, textAlign: 'center', padding: 16 }}>파일 또는 폴더를 추가하세요</div>
+              ) : (
+                bcastXferFiles.map((f, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '3px 6px', gap: 6 }}>
+                    <span style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={`${f.sourceTermId ? `원격(${f.sourceLabel}):` : '로컬:'} ${f.path}`}>
+                      {f.sourceTermId ? '🌐' : '💻'} {f.isFolder ? '📁' : '📄'} {f.path}
+                      {f.sourceTermId && <span style={{ color: '#8ab', fontSize: 10, marginLeft: 6 }}>[{f.sourceLabel}]</span>}
+                    </span>
+                    <button onClick={() => setBcastXferFiles(prev => prev.filter((_, idx) => idx !== i))} style={{ padding: '0 8px' }}>✕</button>
+                  </div>
+                ))
+              )}
+            </div>
+            {bcastXferLog.length > 0 && (
+              <div style={{ maxHeight: 120, overflowY: 'auto', fontSize: 11, fontFamily: 'monospace', color: '#aaa', background: '#0c0c0c', padding: 6, borderRadius: 4, marginTop: 8 }}>
+                {bcastXferLog.map((l, i) => (
+                  <div key={i} style={{ color: l.startsWith('✓') ? '#7fcf6e' : (l.startsWith('✗') ? '#e36b6b' : '#aaa') }}>{l}</div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+              <button onClick={() => setShowBcastFileXfer(false)} disabled={bcastXferInProgress}>닫기</button>
+              <button className="primary" disabled={bcastXferInProgress || bcastXferFiles.length === 0 || collectBroadcastTargets(broadcastScope).length === 0}
+                onClick={async () => {
+                  const targets = collectBroadcastTargets(broadcastScope);
+                  if (targets.length === 0) { flashBroadcastNotice('대상 세션이 없습니다', 'warn'); return; }
+                  setBcastXferInProgress(true);
+                  setBcastXferLog([`▶ ${targets.length}개 세션 × ${bcastXferFiles.length}개 항목 전송 시작`]);
+                  const override = bcastXferPath.trim();
+                  let okCount = 0;
+                  let errCount = 0;
+                  for (const tid of targets) {
+                    const basePath = override || getCurrentPwdForTerm(tid) || '/';
+                    const info = getTermSessionInfo(tid);
+                    const label = info?.sessionName || tid.slice(-6);
+                    for (const f of bcastXferFiles) {
+                      const filename = f.path.replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
+                      const remotePath = basePath.endsWith('/') ? basePath + filename : basePath + '/' + filename;
+                      // 동일 세션은 source == target 이므로 skip
+                      if (f.sourceTermId && f.sourceTermId === tid) {
+                        setBcastXferLog(prev => [...prev, `↷ ${label}: ${filename} (소스와 동일 세션, 건너뜀)`]);
+                        continue;
+                      }
+                      const src: any = f.sourceTermId
+                        ? { mode: 'remote', termId: f.sourceTermId, path: f.path }
+                        : { mode: 'local', path: f.path };
+                      try {
+                        const r: any = await (window as any).api?.feTransfer?.(
+                          src,
+                          { mode: 'remote', termId: tid, path: remotePath },
+                          filename,
+                        );
+                        if (r?.success) {
+                          okCount++;
+                          setBcastXferLog(prev => [...prev, `✓ ${label}: ${filename} → ${basePath}`]);
+                        } else {
+                          errCount++;
+                          setBcastXferLog(prev => [...prev, `✗ ${label}: ${filename} — ${r?.error || 'unknown'}`]);
+                        }
+                      } catch (err: any) {
+                        errCount++;
+                        setBcastXferLog(prev => [...prev, `✗ ${label}: ${filename} — ${err?.message || err}`]);
+                      }
+                    }
+                  }
+                  setBcastXferLog(prev => [...prev, `● 완료: 성공 ${okCount}, 실패 ${errCount}`]);
+                  setBcastXferInProgress(false);
+                  flashBroadcastNotice(`파일전송 완료 (성공 ${okCount}/${okCount + errCount})`, errCount === 0 ? 'ok' : 'warn');
+                }}>
+                {bcastXferInProgress ? '전송 중...' : '전송'}
+              </button>
             </div>
           </div>
         </div>
