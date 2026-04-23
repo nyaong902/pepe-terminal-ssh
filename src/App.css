@@ -3670,6 +3670,8 @@ html, body {
 .remote-file-ctx-item:hover { background: #3a5075; color: #fff; }
 .remote-file-ctx-item.claude { color: #9cf; }
 .remote-file-ctx-item.claude:hover { background: #2a4060; color: #fff; }
+.remote-file-ctx-item.danger { color: #ff8080; }
+.remote-file-ctx-item.danger:hover { background: #5a2a2a; color: #fff; }
 
 /* Claude 첨부 진행 토스트 */
 .claude-attach-toast {

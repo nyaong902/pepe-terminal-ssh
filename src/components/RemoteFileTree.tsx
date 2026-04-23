@@ -511,6 +511,24 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
             } catch {}
             setCtxMenu(null);
           }}>📋 경로 복사</div>
+          <div className="remote-file-ctx-item danger" onClick={async () => {
+            const node = ctxMenu.node;
+            setCtxMenu(null);
+            const kind = node.isDir ? '폴더(재귀)' : '파일';
+            if (!confirm(`${kind}을(를) 삭제하시겠습니까?\n\n${node.path}`)) return;
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const r = await (window as any).api?.feDelete?.('remote', node.path, termId);
+              if (!r?.success) {
+                alert(`삭제 실패: ${r?.error || '알 수 없는 오류'}`);
+                return;
+              }
+              // 삭제된 노드의 부모 경로를 다시 로드
+              if (root) navigateTo(root.path);
+            } catch (err: any) {
+              alert(`삭제 실패: ${err?.message || err}`);
+            }
+          }}>🗑 삭제{ctxMenu.node.isDir ? ' (폴더 재귀)' : ''}</div>
             </>
           )}
         </div>

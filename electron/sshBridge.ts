@@ -555,16 +555,22 @@ class SSHBridge extends EventEmitter {
 
   async handleSFTPDelete(panelId: string, filePath: string): Promise<void> {
     const sftp = await this.getSftp(panelId);
-    return new Promise((resolve, reject) => {
-      sftp.stat(filePath, (err: any, stats: any) => {
-        if (err) return reject(err);
-        if (stats.isDirectory()) {
-          sftp.rmdir(filePath, (e: any) => e ? reject(e) : resolve());
-        } else {
-          sftp.unlink(filePath, (e: any) => e ? reject(e) : resolve());
+    // 재귀 구현 — 폴더는 내부 파일/하위폴더 먼저 삭제 후 rmdir
+    const deleteRecursive = async (p: string): Promise<void> => {
+      const stats: any = await new Promise((res, rej) => sftp.stat(p, (e: any, s: any) => e ? rej(e) : res(s)));
+      if (stats.isDirectory()) {
+        const entries: any[] = await new Promise((res, rej) => sftp.readdir(p, (e: any, l: any) => e ? rej(e) : res(l)));
+        for (const entry of entries) {
+          if (entry.filename === '.' || entry.filename === '..') continue;
+          const childPath = p.endsWith('/') ? p + entry.filename : p + '/' + entry.filename;
+          await deleteRecursive(childPath);
         }
-      });
-    });
+        await new Promise<void>((res, rej) => sftp.rmdir(p, (e: any) => e ? rej(e) : res()));
+      } else {
+        await new Promise<void>((res, rej) => sftp.unlink(p, (e: any) => e ? rej(e) : res()));
+      }
+    };
+    await deleteRecursive(filePath);
   }
 
   async handleSFTPMkdir(panelId: string, dirPath: string): Promise<void> {
