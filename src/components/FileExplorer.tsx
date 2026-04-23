@@ -34,6 +34,34 @@ export const FileExplorer: React.FC<Props> = ({ sessions }) => {
     return saved ? Number(saved) : 120;
   });
   const resizing = React.useRef<{ startY: number; startH: number } | null>(null);
+  // 세션 ID → 폴더 이름 매핑 (드롭다운 label 에 폴더 접두사 붙이기용)
+  const [sessionFolderMap, setSessionFolderMap] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data: any = await api.listSessions?.();
+        if (cancelled) return;
+        const allSessions: any[] = data?.sessions ?? [];
+        const folders: any[] = data?.folders ?? [];
+        const folderById: Record<string, any> = {};
+        for (const f of folders) folderById[f.id] = f;
+        // 폴더 경로 만들기 (부모 → 자식) — "root/sub" 형태, 루트 세션은 빈 문자열
+        const folderPath = (fid?: string): string => {
+          if (!fid) return '';
+          const f = folderById[fid];
+          if (!f) return '';
+          const parent = folderPath(f.parentId);
+          return parent ? `${parent}/${f.name}` : f.name;
+        };
+        const map: Record<string, string> = {};
+        for (const s of allSessions) map[s.id] = folderPath(s.folderId);
+        setSessionFolderMap(map);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [sessions.length]);
 
   // 초기 경로
   useEffect(() => {
@@ -132,7 +160,9 @@ export const FileExplorer: React.FC<Props> = ({ sessions }) => {
   useEffect(() => {
     const newSources: PanelSource[] = [{ mode: 'local', label: '🖥️ 로컬' }];
     for (const sess of sessions) {
-      newSources.push({ mode: 'remote', termId: sess.termId, label: `🌐 ${sess.sessionName}` });
+      const folder = sessionFolderMap[sess.sessionId];
+      const label = folder ? `🌐 ${sess.sessionName}  [${folder}]` : `🌐 ${sess.sessionName}`;
+      newSources.push({ mode: 'remote', termId: sess.termId, label });
     }
     // 기존 수동 SFTP 연결 유지
     for (const s of sources) {
@@ -161,7 +191,7 @@ export const FileExplorer: React.FC<Props> = ({ sessions }) => {
       };
       tryGetHome(10);
     }
-  }, [sessKey, initDone]);
+  }, [sessKey, initDone, sessionFolderMap]);
 
   const sep = (source: PanelSource) => source.mode === 'local' && navigator.platform.startsWith('Win') ? '\\' : '/';
 

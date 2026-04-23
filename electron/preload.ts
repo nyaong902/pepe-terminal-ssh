@@ -35,7 +35,7 @@ contextBridge.exposeInMainWorld('api', {
   feDelete: (mode: string, filePath: string, termId?: string) => ipcRenderer.invoke('fe:delete', { mode, termId, filePath }),
   feRename: (mode: string, oldPath: string, newPath: string, termId?: string) => ipcRenderer.invoke('fe:rename', { mode, termId, oldPath, newPath }),
   feHomeDir: (mode: string, termId?: string) => ipcRenderer.invoke('fe:home-dir', { mode, termId }),
-  feSftpConnect: (connId: string, host: string, port: number, username: string, auth?: any) => ipcRenderer.invoke('fe:sftp-connect', { connId, host, port, username, auth }),
+  feSftpConnect: (connId: string, host: string, port: number, username: string, auth?: any, jumpOpts?: { host: string; user?: string; port?: number; password?: string }) => ipcRenderer.invoke('fe:sftp-connect', { connId, host, port, username, auth, jumpOpts }),
   feSftpDisconnect: (connId: string) => ipcRenderer.invoke('fe:sftp-disconnect', { connId }),
   feConnectedSessions: () => ipcRenderer.invoke('fe:connected-sessions'),
 

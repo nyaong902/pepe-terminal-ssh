@@ -1506,16 +1506,23 @@ function App() {
             setTabs(prev => [...prev, feTab!]);
           }
           setActiveTabId(feTab.id);
-          // SFTP 연결
+          // SFTP 연결 — 점프 타겟 설정돼 있으면 ProxyJump 로 내부 서버까지 직결
           try {
             const data = await (window as any).api.listSessions();
             const allSessions = data?.sessions ?? data ?? [];
             const sess = allSessions.find((s: any) => s.id === sessionId);
             if (!sess) return;
             const connId = `sftp-fe-${Date.now()}`;
-            const result = await (window as any).api.feSftpConnect?.(connId, sess.host, sess.port || 22, sess.username, sess.auth);
+            const jumpOpts = sess.jumpTargetHost?.trim()
+              ? { host: sess.jumpTargetHost.trim(), user: sess.jumpTargetUser || 'root', port: Number(sess.jumpTargetPort) || 22, password: sess.jumpTargetPassword || undefined }
+              : undefined;
+            // 파일 전송 탭 표시명: 점프 타겟이 있으면 그 호스트로 표기
+            const displayHost = jumpOpts ? jumpOpts.host : sess.host;
+            const result = await (window as any).api.feSftpConnect?.(connId, sess.host, sess.port || 22, sess.username, sess.auth, jumpOpts);
             if (result?.success) {
-              window.dispatchEvent(new CustomEvent('fe-sftp-connected', { detail: { connId, sessionName, host: sess.host } }));
+              window.dispatchEvent(new CustomEvent('fe-sftp-connected', { detail: { connId, sessionName, host: displayHost } }));
+            } else if (result?.error) {
+              console.error('[fe-sftp-connect] failed:', result.error);
             }
           } catch {}
         }}

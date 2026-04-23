@@ -851,10 +851,10 @@ ipcMain.handle('fe:home-dir', async (_e, { mode, termId }: { mode: string; termI
   } catch { return '/'; }
 });
 
-ipcMain.handle('fe:sftp-connect', async (_e, { connId, host, port, username, auth }: any) => {
+ipcMain.handle('fe:sftp-connect', async (_e, { connId, host, port, username, auth, jumpOpts }: any) => {
   try {
     const bridge = getSSHBridge();
-    await bridge.handleSFTPConnect(connId, host, port || 22, username, auth);
+    await bridge.handleSFTPConnect(connId, host, port || 22, username, auth, jumpOpts);
     return { success: true };
   } catch (err: any) { return { success: false, error: String(err) }; }
 });

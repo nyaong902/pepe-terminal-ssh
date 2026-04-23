@@ -784,22 +784,82 @@ class SSHBridge extends EventEmitter {
     });
   }
 
-  async handleSFTPConnect(connId: string, host: string, port: number, username: string, auth?: any): Promise<void> {
+  // jumpOpts 가 주어지면 primary(host) 를 경유해서 점프 타겟에 SFTP 직결.
+  // 터미널 세션의 handleConnect 와 동일한 ProxyJump 패턴이지만 shell 대신 SFTP 채널만 유지.
+  async handleSFTPConnect(
+    connId: string,
+    host: string,
+    port: number,
+    username: string,
+    auth?: any,
+    jumpOpts?: { host: string; user?: string; port?: number; password?: string }
+  ): Promise<void> {
     if (this.clients.has(connId)) return;
     return new Promise((resolve, reject) => {
-      const conn = new Client();
-      conn.on('ready', () => {
-        this.clients.set(connId, { conn });
-        resolve();
+      const primaryConn = new Client();
+      primaryConn.on('error', (err: any) => reject(err));
+      primaryConn.on('ready', async () => {
+        if (!jumpOpts?.host) {
+          // 점프 없음 — primary 자체를 연결로 저장
+          this.clients.set(connId, { conn: primaryConn });
+          resolve();
+          return;
+        }
+        // ProxyJump — 점프 타겟에 직결 후 그 Client 를 SFTP 용으로 저장
+        try {
+          const jumpHost = jumpOpts.host;
+          const jumpUser = jumpOpts.user || 'root';
+          const jumpPort = jumpOpts.port || 22;
+          const authCfg: any = {};
+          if (jumpOpts.password) {
+            authCfg.password = jumpOpts.password;
+          } else {
+            const keyBuf = await this._readSshKeyFromConn(primaryConn);
+            if (!keyBuf) throw new Error(`${host} 의 ~/.ssh/ 에서 사용 가능한 키 미발견`);
+            authCfg.privateKey = keyBuf;
+          }
+          const sock: any = await new Promise((res, rej) => {
+            primaryConn.forwardOut('127.0.0.1', 0, jumpHost, jumpPort, (e: any, s: any) => e ? rej(e) : res(s));
+          });
+          sock.on('error', (e: any) => console.log(`[sftp-jump-${connId}] sock error:`, e?.message));
+          const ssh2Constants = require('ssh2/lib/protocol/constants');
+          const jumpConn = new Client();
+          jumpConn.on('error', (e: any) => console.log(`[sftp-jump-${connId}] jumpConn error:`, e?.message));
+          await new Promise<void>((res, rej) => {
+            const onReady = () => { cleanup(); res(); };
+            const onErr = (e: any) => { cleanup(); rej(e); };
+            const cleanup = () => { jumpConn.removeListener('ready', onReady); jumpConn.removeListener('error', onErr); };
+            jumpConn.once('ready', onReady);
+            jumpConn.once('error', onErr);
+            jumpConn.connect({
+              sock,
+              username: jumpUser,
+              ...authCfg,
+              algorithms: {
+                kex: ssh2Constants.SUPPORTED_KEX,
+                serverHostKey: ssh2Constants.SUPPORTED_SERVER_HOST_KEY,
+                cipher: ssh2Constants.SUPPORTED_CIPHER,
+                hmac: ssh2Constants.SUPPORTED_MAC,
+              },
+              tryKeyboard: !!jumpOpts.password,
+              readyTimeout: 30000,
+            } as any);
+          });
+          // jumpConn 을 SFTP 용 conn 으로 저장, primary 는 transport 유지
+          this.clients.set(connId, { conn: jumpConn, primaryConn });
+          resolve();
+        } catch (err) {
+          try { primaryConn.end(); } catch {}
+          reject(err);
+        }
       });
-      conn.on('error', (err: any) => reject(err));
       const cfg: any = { host, port, username, tryKeyboard: false, readyTimeout: 15000 };
       if (auth?.type === 'password') {
         cfg.password = auth.password;
       } else if (auth?.type === 'key') {
         try { cfg.privateKey = fs.readFileSync(auth.keyPath); } catch {}
       }
-      conn.connect(cfg);
+      primaryConn.connect(cfg);
     });
   }
 
@@ -807,6 +867,7 @@ class SSHBridge extends EventEmitter {
     const rec = this.clients.get(connId);
     if (!rec) return;
     try { rec.conn.end(); } catch {}
+    try { rec.primaryConn?.end(); } catch {}
     this.clients.delete(connId);
     this.sftpCache.delete(connId);
   }
