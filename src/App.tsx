@@ -1,5 +1,5 @@
 // src/App.tsx
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import './App.css';
 import { TabBar } from './components/TabBar';
 import { MenuBar } from './components/MenuBar';
@@ -12,6 +12,9 @@ import { ClaudeChat } from './components/ClaudeChat';
 import { QuickConnectBar, QuickConnectResult } from './components/QuickConnectDialog';
 import { StatusBar } from './components/StatusBar';
 import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect, toggleTreeVisibleForTerm, startInitialConnectWatchdog, getCurrentPwdForTerm } from './components/TerminalPanel';
+import { marked } from 'marked';
+// @ts-ignore — vite ?raw 로 docs/MANUAL.md 를 번들 문자열로 임베드
+import manualMd from '../docs/MANUAL.md?raw';
 import { getTerminalSettings, saveTerminalSettings, TerminalSettings } from './utils/terminalSettings';
 import { loadKeybindings, matchKeybinding, getKeybindings, DEFAULT_KEYBINDINGS, KEYBINDING_LABELS, keyEventToCombo, setKeybindingListening } from './utils/keybindings';
 import { getThemeList } from './utils/terminalThemes';
@@ -236,20 +239,91 @@ function App() {
   const [bcastXferLog, setBcastXferLog] = useState<string[]>([]);
   // 원격 소스 picker (일괄 파일 전송 서브 모달)
   const [remotePickerOpen, setRemotePickerOpen] = useState(false);
-  const [remotePickerTermId, setRemotePickerTermId] = useState<string>('');
+  // 선택된 세션의 ID (sessionsStore 기준). 실제 SFTP 연결의 termId/connId 는 remotePickerConnId.
+  const [remotePickerSessionId, setRemotePickerSessionId] = useState<string>('');
+  const [remotePickerConnId, setRemotePickerConnId] = useState<string>('');
   const [remotePickerPath, setRemotePickerPath] = useState<string>('');
   const [remotePickerFiles, setRemotePickerFiles] = useState<{ name: string; isDir: boolean }[]>([]);
-  const [remotePickerSelected, setRemotePickerSelected] = useState<Set<string>>(new Set()); // 이름만 저장
+  const [remotePickerSelected, setRemotePickerSelected] = useState<Set<string>>(new Set());
   const [remotePickerLoading, setRemotePickerLoading] = useState(false);
+  const [remotePickerConnecting, setRemotePickerConnecting] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+  const manualHtml = useMemo(() => {
+    try { return marked.parse(manualMd) as string; } catch { return '<pre>매뉴얼 로드 실패</pre>'; }
+  }, []);
+  const [remotePickerSessions, setRemotePickerSessions] = useState<any[]>([]); // 전체 세션 리스트
+  const [remotePickerFolders, setRemotePickerFolders] = useState<any[]>([]); // 폴더 맵
+  // picker 가 새로 만든 임시 SFTP 연결 connId 들 — 모달 닫힐 때 일괄 해제
+  const [remotePickerTempConns, setRemotePickerTempConns] = useState<string[]>([]);
 
-  // 원격 picker 가 열리거나 termId 가 바뀌면 파일 리스트 자동 로드
+  // picker 가 열릴 때 전체 세션/폴더 로드
   useEffect(() => {
-    if (!remotePickerOpen || !remotePickerTermId || !remotePickerPath) return;
+    if (!remotePickerOpen) return;
+    (async () => {
+      try {
+        const data: any = await (window as any).api?.listSessions?.();
+        setRemotePickerSessions(data?.sessions || []);
+        setRemotePickerFolders(data?.folders || []);
+      } catch {}
+    })();
+  }, [remotePickerOpen]);
+
+  // 세션 선택 변경 시 자동으로 연결 보장 + 파일 리스트 로드
+  useEffect(() => {
+    if (!remotePickerOpen || !remotePickerSessionId) return;
+    let cancelled = false;
+    (async () => {
+      // 1) 이미 터미널로 열린 세션이면 그 termId 재사용
+      if (activeTab) {
+        const open = collectAllSessions(activeTab.layout).find(s => s.sessionId === remotePickerSessionId && isTermConnected(s.termId));
+        if (open) {
+          if (!cancelled) {
+            setRemotePickerConnId(open.termId);
+            const pwd = getCurrentPwdForTerm(open.termId) || '/';
+            setRemotePickerPath(pwd);
+          }
+          return;
+        }
+      }
+      // 2) 아니면 백그라운드 SFTP 연결 시도
+      const sess = remotePickerSessions.find(s => s.id === remotePickerSessionId);
+      if (!sess) return;
+      setRemotePickerConnecting(true);
+      try {
+        const connId = `bcast-pick-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const jumpOpts = sess.jumpTargetHost?.trim()
+          ? { host: sess.jumpTargetHost.trim(), user: sess.jumpTargetUser || 'root', port: Number(sess.jumpTargetPort) || 22, password: sess.jumpTargetPassword || undefined }
+          : undefined;
+        const r: any = await (window as any).api?.feSftpConnect?.(connId, sess.host, sess.port || 22, sess.username, sess.auth, jumpOpts);
+        if (cancelled) return;
+        if (!r?.success) {
+          alert(`연결 실패 (${sess.name}): ${r?.error || '알 수 없는 오류'}`);
+          setRemotePickerConnecting(false);
+          return;
+        }
+        setRemotePickerTempConns(prev => [...prev, connId]);
+        setRemotePickerConnId(connId);
+        try {
+          const home: any = await (window as any).api?.feHomeDir?.('remote', connId);
+          const homePath = typeof home === 'string' ? home : (home?.path || '/');
+          if (!cancelled) setRemotePickerPath(homePath || '/');
+        } catch { if (!cancelled) setRemotePickerPath('/'); }
+      } catch (err: any) {
+        if (!cancelled) alert(`연결 실패: ${err?.message || err}`);
+      }
+      if (!cancelled) setRemotePickerConnecting(false);
+    })();
+    return () => { cancelled = true; };
+  }, [remotePickerOpen, remotePickerSessionId, remotePickerSessions]);
+
+  // 경로/connId 기반 파일 리스트 로드
+  useEffect(() => {
+    if (!remotePickerOpen || !remotePickerConnId || !remotePickerPath) return;
     let cancelled = false;
     (async () => {
       setRemotePickerLoading(true);
       try {
-        const r: any = await (window as any).api?.feListDir?.('remote', remotePickerPath, remotePickerTermId);
+        const r: any = await (window as any).api?.feListDir?.('remote', remotePickerPath, remotePickerConnId);
         if (!cancelled) setRemotePickerFiles(r?.files || []);
       } catch {
         if (!cancelled) setRemotePickerFiles([]);
@@ -257,7 +331,17 @@ function App() {
       if (!cancelled) setRemotePickerLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [remotePickerOpen, remotePickerTermId]);
+  }, [remotePickerOpen, remotePickerConnId, remotePickerPath]);
+
+  // 모달 닫힐 때 임시 연결 정리
+  useEffect(() => {
+    if (remotePickerOpen) return;
+    if (remotePickerTempConns.length === 0) return;
+    for (const cid of remotePickerTempConns) {
+      try { (window as any).api?.feSftpDisconnect?.(cid); } catch {}
+    }
+    setRemotePickerTempConns([]);
+  }, [remotePickerOpen]);
   const [broadcastHistoryIdx, setBroadcastHistoryIdx] = useState(-1);
   // 히스토리 드롭다운에서 방향키로 이동한 항목이 보이게 스크롤 따라오기
   useEffect(() => {
@@ -1297,6 +1381,8 @@ function App() {
     {
       label: '도움말',
       items: [
+        { label: '📖 매뉴얼...', action: () => setShowManual(true) },
+        { separator: true, label: '' },
         { label: '단축키 목록', action: () => {
           const kb = getKeybindings();
           const lines = Object.keys(KEYBINDING_LABELS).map(id => `${kb[id] || '(없음)'} — ${KEYBINDING_LABELS[id]}`);
@@ -1703,6 +1789,7 @@ function App() {
             title="전송 대상"
           >
             <option value="visible">보이는 탭 ({collectBroadcastTargets('visible').length})</option>
+            <option value="current">현재 세션 ({collectBroadcastTargets('current').length})</option>
             <option value="connected">연결된 세션 ({collectBroadcastTargets('connected').length})</option>
           </select>
           <div style={{ position: 'relative', flex: 1, display: 'flex' }}>
@@ -1770,6 +1857,7 @@ function App() {
           <button className="broadcast-btn" onClick={() => sendBroadcast(broadcastScope)} title="텍스트 전송 (Enter)">전송</button>
           <button className="broadcast-btn" onClick={() => { setBcastXferFiles([]); setBcastXferPath(''); setBcastXferLog([]); setShowBcastFileXfer(true); }} title="여러 세션에 파일/폴더 일괄 업로드">📤 파일전송</button>
           <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x1b[A', label: '↑' })} title="위 방향키 (이전 명령) 전송">↑</button>
+          <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x1b[B', label: '↓' })} title="아래 방향키 (다음 명령) 전송">↓</button>
           <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x03', label: '^C' })} title="Ctrl+C (SIGINT) 전송">^C</button>
           <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x04', label: '^D' })} title="Ctrl+D (EOF) 전송">^D</button>
           {broadcastNotice && (
@@ -2145,58 +2233,102 @@ function App() {
         </div>
       )}
 
+      {showManual && (
+        <div className="session-editor-backdrop" onClick={() => setShowManual(false)}>
+          <div className="session-editor manual-modal" onClick={e => e.stopPropagation()}
+            style={{ width: '80vw', maxWidth: 1000, height: '85vh', display: 'flex', flexDirection: 'column' }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 4px 8px', borderBottom: '1px solid #333' }}>
+              <h3 style={{ margin: 0 }}>📖 PePe Terminal(SSH) 매뉴얼</h3>
+              <button onClick={() => setShowManual(false)} title="닫기">✕</button>
+            </div>
+            <div className="manual-content" style={{ flex: 1, overflow: 'auto', padding: '12px 16px' }}
+              dangerouslySetInnerHTML={{ __html: manualHtml }}
+            />
+          </div>
+        </div>
+      )}
+
       {remotePickerOpen && (
         <div className="session-editor-backdrop" style={{ zIndex: 10000 }} onClick={() => setRemotePickerOpen(false)}>
           <div className="session-editor" onClick={e => e.stopPropagation()} style={{ width: 580, maxHeight: '80vh', display: 'flex', flexDirection: 'column', zIndex: 10001 }}>
             <h3>🌐 원격 파일 선택</h3>
 
-            <label style={{ fontSize: 12, color: '#bbb' }}>소스 세션</label>
-            <select value={remotePickerTermId} onChange={async (e) => {
-              const tid = e.target.value;
-              setRemotePickerTermId(tid);
-              const pwd = getCurrentPwdForTerm(tid) || '/';
-              setRemotePickerPath(pwd);
-              setRemotePickerSelected(new Set());
-              setRemotePickerLoading(true);
-              try {
-                const r: any = await (window as any).api?.feListDir?.('remote', pwd, tid);
-                setRemotePickerFiles(r?.files || []);
-              } catch { setRemotePickerFiles([]); }
-              setRemotePickerLoading(false);
-            }}>
-              {activeTab && collectAllSessions(activeTab.layout).filter(s => isTermConnected(s.termId)).map(s => (
-                <option key={s.termId} value={s.termId}>{getTermSessionInfo(s.termId)?.sessionName || s.sessionName}</option>
-              ))}
-            </select>
+            <label style={{ fontSize: 12, color: '#bbb' }}>소스 세션 (전체 목록, 미연결 세션 선택 시 백그라운드 SFTP 연결)</label>
+            {(() => {
+              // 연결된 termId 맵 구축 (sessionId → 있으면 연결됨)
+              const connectedSet = new Set<string>();
+              if (activeTab) {
+                for (const s of collectAllSessions(activeTab.layout)) {
+                  if (s.sessionId && isTermConnected(s.termId)) connectedSet.add(s.sessionId);
+                }
+              }
+              // 폴더 트리 (간단 평면화) — 각 세션을 "폴더경로/세션명" 으로 정렬
+              const folderPath = (fid?: string): string => {
+                if (!fid) return '';
+                const f = remotePickerFolders.find(x => x.id === fid);
+                if (!f) return '';
+                const parent = folderPath(f.parentId);
+                return parent ? `${parent}/${f.name}` : f.name;
+              };
+              const sorted = [...remotePickerSessions].sort((a, b) => {
+                const fa = folderPath(a.folderId);
+                const fb = folderPath(b.folderId);
+                return fa.localeCompare(fb) || a.name.localeCompare(b.name);
+              });
+              return (
+                <select value={remotePickerSessionId} onChange={e => {
+                  setRemotePickerSessionId(e.target.value);
+                  setRemotePickerFiles([]);
+                  setRemotePickerSelected(new Set());
+                }}>
+                  <option value="">(세션 선택)</option>
+                  {sorted.map(s => {
+                    const fp = folderPath(s.folderId);
+                    const mark = connectedSet.has(s.id) ? '🟢' : '⚪';
+                    return (
+                      <option key={s.id} value={s.id}>
+                        {mark} {s.name}{fp ? ` [${fp}]` : ''} ({s.host})
+                      </option>
+                    );
+                  })}
+                </select>
+              );
+            })()}
+            {remotePickerConnecting && (
+              <div style={{ fontSize: 11, color: '#f0c64c', marginTop: 4 }}>
+                연결 중...
+              </div>
+            )}
 
             <label style={{ fontSize: 12, color: '#bbb', marginTop: 10 }}>경로</label>
             <div style={{ display: 'flex', gap: 4 }}>
               <input type="text" value={remotePickerPath} onChange={e => setRemotePickerPath(e.target.value)}
-                onKeyDown={async (e) => {
+                onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    setRemotePickerLoading(true);
-                    try { const r: any = await (window as any).api?.feListDir?.('remote', remotePickerPath, remotePickerTermId); setRemotePickerFiles(r?.files || []); } catch { setRemotePickerFiles([]); }
-                    setRemotePickerLoading(false);
+                    setRemotePickerSelected(new Set());
+                    // path 변경은 useEffect 가 자동 재로드
                   }
                 }}
-                style={{ flex: 1 }} />
-              <button onClick={async () => {
+                style={{ flex: 1 }}
+                disabled={!remotePickerConnId} />
+              <button onClick={() => {
                 const parent = remotePickerPath.replace(/\/[^/]+\/?$/, '') || '/';
                 setRemotePickerPath(parent);
                 setRemotePickerSelected(new Set());
-                setRemotePickerLoading(true);
-                try { const r: any = await (window as any).api?.feListDir?.('remote', parent, remotePickerTermId); setRemotePickerFiles(r?.files || []); } catch { setRemotePickerFiles([]); }
-                setRemotePickerLoading(false);
-              }} title="상위 폴더">▲</button>
+              }} title="상위 폴더" disabled={!remotePickerConnId}>▲</button>
               <button onClick={async () => {
+                if (!remotePickerConnId) return;
                 setRemotePickerLoading(true);
-                try { const r: any = await (window as any).api?.feListDir?.('remote', remotePickerPath, remotePickerTermId); setRemotePickerFiles(r?.files || []); } catch { setRemotePickerFiles([]); }
+                try { const r: any = await (window as any).api?.feListDir?.('remote', remotePickerPath, remotePickerConnId); setRemotePickerFiles(r?.files || []); } catch { setRemotePickerFiles([]); }
                 setRemotePickerLoading(false);
-              }} title="새로고침">⟳</button>
+              }} title="새로고침" disabled={!remotePickerConnId}>⟳</button>
             </div>
 
             <div style={{ flex: 1, minHeight: 200, maxHeight: 320, overflowY: 'auto', border: '1px solid #333', borderRadius: 4, marginTop: 8, background: '#161616' }}>
-              {remotePickerLoading ? (
+              {!remotePickerConnId ? (
+                <div style={{ color: '#666', fontSize: 12, padding: 16, textAlign: 'center' }}>세션을 선택하세요</div>
+              ) : remotePickerLoading || remotePickerConnecting ? (
                 <div style={{ color: '#888', fontSize: 12, padding: 16, textAlign: 'center' }}>로딩 중...</div>
               ) : remotePickerFiles.length === 0 ? (
                 <div style={{ color: '#666', fontSize: 12, padding: 16, textAlign: 'center' }}>(비어있음 또는 경로 에러)</div>
@@ -2213,15 +2345,11 @@ function App() {
                           return next;
                         });
                       }}
-                      onDoubleClick={async () => {
+                      onDoubleClick={() => {
                         if (!f.isDir) return;
                         const sep = remotePickerPath.endsWith('/') ? '' : '/';
-                        const newPath = remotePickerPath + sep + f.name;
-                        setRemotePickerPath(newPath);
+                        setRemotePickerPath(remotePickerPath + sep + f.name);
                         setRemotePickerSelected(new Set());
-                        setRemotePickerLoading(true);
-                        try { const r: any = await (window as any).api?.feListDir?.('remote', newPath, remotePickerTermId); setRemotePickerFiles(r?.files || []); } catch { setRemotePickerFiles([]); }
-                        setRemotePickerLoading(false);
                       }}
                     >
                       <input type="checkbox" readOnly checked={remotePickerSelected.has(f.name)} />
@@ -2231,23 +2359,24 @@ function App() {
               )}
             </div>
             <div style={{ fontSize: 11, color: '#777', marginTop: 4 }}>
-              클릭: 선택 / 더블클릭: 폴더 진입. {remotePickerSelected.size}개 선택됨
+              🟢 연결된 세션 / ⚪ 미연결 (선택 시 자동 연결). 클릭: 선택 / 더블클릭: 폴더 진입. {remotePickerSelected.size}개 선택됨
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
               <button onClick={() => setRemotePickerOpen(false)}>닫기</button>
-              <button className="primary" disabled={remotePickerSelected.size === 0}
+              <button className="primary" disabled={remotePickerSelected.size === 0 || !remotePickerConnId}
                 onClick={() => {
-                  const info = getTermSessionInfo(remotePickerTermId);
-                  const sessLabel = info?.sessionName || remotePickerTermId.slice(-6);
+                  const sess = remotePickerSessions.find(s => s.id === remotePickerSessionId);
+                  const sessLabel = sess?.name || remotePickerConnId.slice(-6);
                   const toAdd = [...remotePickerSelected].map(name => {
                     const sep = remotePickerPath.endsWith('/') ? '' : '/';
                     const fullPath = remotePickerPath + sep + name;
                     const isFolder = remotePickerFiles.find(f => f.name === name)?.isDir || false;
-                    return { path: fullPath, isFolder, sourceTermId: remotePickerTermId, sourceLabel: sessLabel };
+                    return { path: fullPath, isFolder, sourceTermId: remotePickerConnId, sourceLabel: sessLabel };
                   });
                   setBcastXferFiles(prev => [...prev, ...toAdd]);
-                  setRemotePickerOpen(false);
+                  // 닫진 않음 — 여러 세션에서 연속 선택 가능하도록 유지. 세션만 초기화.
+                  setRemotePickerSelected(new Set());
                 }}
               >선택 항목 추가 ({remotePickerSelected.size}개)</button>
             </div>
@@ -2264,6 +2393,7 @@ function App() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <select value={broadcastScope} onChange={e => setBroadcastScope(e.target.value as any)} style={{ flex: 1 }}>
                 <option value="visible">보이는 세션 모두</option>
+                <option value="current">현재 세션</option>
                 <option value="connected">연결된 세션 전체</option>
               </select>
               <span style={{ color: '#8ab', fontSize: 12 }}>{collectBroadcastTargets(broadcastScope).length}개</span>
@@ -2286,17 +2416,12 @@ function App() {
                 if (r?.path) setBcastXferFiles(prev => [...prev, { path: r.path, isFolder: true }]);
               }}>+ 로컬 폴더</button>
               <button onClick={() => {
-                // 연결된 세션들 중 첫 번째 디폴트
-                if (!activeTab) return;
-                const allSess = collectAllSessions(activeTab.layout);
-                const connected = allSess.filter(s => isTermConnected(s.termId));
-                if (connected.length === 0) { alert('연결된 세션이 없습니다'); return; }
-                const firstTid = connected[0].termId;
-                setRemotePickerTermId(firstTid);
-                const pwd = getCurrentPwdForTerm(firstTid) || '/';
-                setRemotePickerPath(pwd);
-                setRemotePickerSelected(new Set());
+                // 전체 세션 리스트에서 선택 — 미연결이면 백그라운드 연결
+                setRemotePickerSessionId('');
+                setRemotePickerConnId('');
+                setRemotePickerPath('');
                 setRemotePickerFiles([]);
+                setRemotePickerSelected(new Set());
                 setRemotePickerOpen(true);
               }}>+ 원격 파일 (다른 서버)</button>
               <button onClick={() => setBcastXferFiles([])} disabled={bcastXferFiles.length === 0}>모두 제거</button>

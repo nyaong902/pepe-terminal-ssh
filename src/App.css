@@ -3673,6 +3673,49 @@ html, body {
 .remote-file-ctx-item.danger { color: #ff8080; }
 .remote-file-ctx-item.danger:hover { background: #5a2a2a; color: #fff; }
 
+/* 매뉴얼 모달 내부 렌더링 */
+.manual-modal .manual-content {
+  color: #d4d4d4;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.manual-content h1 { font-size: 22px; margin: 18px 0 10px; color: #fff; border-bottom: 1px solid #444; padding-bottom: 6px; }
+.manual-content h2 { font-size: 18px; margin: 20px 0 8px; color: #8ac6ff; border-bottom: 1px solid #333; padding-bottom: 4px; }
+.manual-content h3 { font-size: 15px; margin: 14px 0 6px; color: #b0d4ff; }
+.manual-content h4 { font-size: 14px; margin: 10px 0 4px; color: #cce; }
+.manual-content p { margin: 6px 0; }
+.manual-content ul, .manual-content ol { padding-left: 22px; margin: 4px 0; }
+.manual-content li { margin: 2px 0; }
+.manual-content code {
+  background: #2a2a2a; color: #e5a96b;
+  padding: 1px 5px; border-radius: 3px;
+  font-family: 'Consolas', 'Menlo', monospace; font-size: 12px;
+}
+.manual-content pre {
+  background: #1c1c1c; border: 1px solid #333;
+  padding: 10px; border-radius: 4px; overflow-x: auto;
+  font-family: 'Consolas', 'Menlo', monospace; font-size: 12px;
+}
+.manual-content pre code { background: transparent; padding: 0; color: #d4d4d4; }
+.manual-content a { color: #69b0ff; text-decoration: none; }
+.manual-content a:hover { text-decoration: underline; }
+.manual-content table {
+  border-collapse: collapse; margin: 10px 0; width: auto;
+  background: #1c1c1c;
+}
+.manual-content th, .manual-content td {
+  border: 1px solid #3a3a3a; padding: 6px 10px; text-align: left;
+}
+.manual-content th { background: #252525; color: #fff; font-weight: 600; }
+.manual-content tr:nth-child(2n) td { background: #1a1a1a; }
+.manual-content blockquote {
+  border-left: 3px solid #5a6b8c; margin: 8px 0; padding: 4px 12px;
+  color: #aaa; background: #1a1a24;
+}
+.manual-content hr { border: 0; border-top: 1px solid #333; margin: 16px 0; }
+.manual-content img { max-width: 100%; border: 1px solid #333; border-radius: 3px; margin: 6px 0; }
+
 /* Claude 첨부 진행 토스트 */
 .claude-attach-toast {
   position: fixed;
