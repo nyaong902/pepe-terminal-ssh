@@ -62,6 +62,7 @@ const NodeView: React.FC<NodeProps> = ({ node, ...h }) => {
             treeWidth={h.treeWidth} onTreeWidthChange={h.onTreeWidthChange}
             onOpenRemoteFile={h.onOpenRemoteFile} onAttachToClaude={h.onAttachToClaude}
             isFloating={isFloating} onToggleFloat={h.onToggleFloat}
+            isSelected={h.selectedPanelId === node.id}
           />
         </div>
       </div>

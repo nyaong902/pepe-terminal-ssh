@@ -9,6 +9,7 @@ import { SearchBar } from './components/SearchBar';
 import { FileExplorer } from './components/FileExplorer';
 import { FileEditor } from './components/FileEditor';
 import { ClaudeChat } from './components/ClaudeChat';
+import { RemoteFileTree } from './components/RemoteFileTree';
 import { QuickConnectBar, QuickConnectResult } from './components/QuickConnectDialog';
 import { StatusBar } from './components/StatusBar';
 import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect, toggleTreeVisibleForTerm, startInitialConnectWatchdog, getCurrentPwdForTerm } from './components/TerminalPanel';
@@ -184,7 +185,12 @@ function App() {
         if (typeof prefs?.remoteTreeWidth === 'number' && prefs.remoteTreeWidth >= 160 && prefs.remoteTreeWidth <= 800) {
           setRemoteTreeWidth(prefs.remoteTreeWidth);
         }
+        if (typeof prefs?.remoteTreePinned === 'boolean') {
+          setRemoteTreePinned(prefs.remoteTreePinned);
+          if (!prefs.remoteTreePinned) setRemoteTreeVisible(false);
+        }
         remoteTreeWidthLoadedRef.current = true;
+        remoteTreePinnedLoadedRef.current = true;
         claudeChatPinnedLoadedRef.current = true;
         showClaudeChatLoadedRef.current = true;
       } catch {}
@@ -356,6 +362,39 @@ function App() {
   const [floatingPanelId, setFloatingPanelId] = useState<string | null>(null);
   const [remoteTreeWidth, setRemoteTreeWidth] = useState<number>(240);
   const remoteTreeWidthLoadedRef = useRef(false);
+  const [remoteTreePinned, setRemoteTreePinned] = useState<boolean>(true);
+  const [remoteTreeVisible, setRemoteTreeVisible] = useState<boolean>(true);
+  // 어느 오버레이가 최상위인지 — hover 중인 쪽이 다른 쪽 위에 오도록
+  const [topPanel, setTopPanel] = useState<'session' | 'filetree' | null>(null);
+  const remoteTreePinnedLoadedRef = useRef(false);
+  const remoteTreeHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 세션 트리거 top 버튼 하단 y 좌표 (파일 트리 트리거의 top 위치 맞추기용)
+  const [fileTreeTriggerTop, setFileTreeTriggerTop] = useState<number>(135);
+  useEffect(() => {
+    const measure = () => {
+      const el = document.querySelector('.session-sidebar-trigger-top') as HTMLElement | null;
+      if (el) {
+        const r = el.getBoundingClientRect();
+        setFileTreeTriggerTop(r.bottom);
+      }
+    };
+    measure();
+    const t1 = setTimeout(measure, 100);
+    const t2 = setTimeout(measure, 500);
+    window.addEventListener('resize', measure);
+    const mo = new MutationObserver(measure);
+    mo.observe(document.body, { childList: true, subtree: true, attributes: true });
+    return () => {
+      clearTimeout(t1); clearTimeout(t2);
+      window.removeEventListener('resize', measure);
+      mo.disconnect();
+    };
+  }, []);
+  useEffect(() => {
+    if (!remoteTreePinnedLoadedRef.current) return;
+    try { (window as any).api?.setUIPrefs?.({ remoteTreePinned }); } catch {}
+    if (remoteTreePinned) setRemoteTreeVisible(true);
+  }, [remoteTreePinned]);
   const [showClaudeChat, setShowClaudeChat] = useState(true);
   const [claudeChatWidth, setClaudeChatWidth] = useState<number>(360);
   const [claudeChatPinned, setClaudeChatPinned] = useState<boolean>(false);
@@ -1420,18 +1459,29 @@ function App() {
             '더블클릭 (세션) — 연결\n\n' +
             '── 파일 트리 / 원격 편집 ──\n' +
             '파일 더블클릭 — 에디터 탭에서 열기\n' +
-            '우클릭 — Claude 에 첨부 / 경로 복사\n' +
+            'Ctrl+클릭 / Shift+클릭 — 다중 선택 (일괄 다운로드)\n' +
+            '우클릭 — Claude 에 첨부 / 경로 복사 / 삭제\n' +
+            '🔄 — 현재 경로 새로고침\n' +
+            '📌 — 파일트리 고정/자동숨김 토글\n' +
+            '좌측 경계 드래그 — 너비 조절\n' +
             'Ctrl+S (에디터) — 저장\n\n' +
             '── Claude 채팅 ──\n' +
             '오른쪽 가장자리 🤖 Claude 영역 hover — 사이드바 펼침 (unpin 모드)\n' +
             '📌 — 사이드바 고정/자동숨김 토글\n' +
+            '좌측 경계 드래그 — 너비 조절 (더블클릭 = 기본값)\n' +
             '/ 버튼 — 슬래시 명령 팔레트 (↑↓ 탐색, Enter 실행, Esc 닫기)\n' +
+            '📄+ / 📁+ — 로컬 파일 / 폴더 첨부\n' +
+            'Ctrl+Wheel — 채팅 폰트 크기 조절\n' +
             'Enter (입력창) — 전송, Shift+Enter — 줄바꿈\n' +
             '🗑 — 대화 + 컨텍스트 초기화\n\n' +
             '── 일괄 전송 ──\n' +
             'Enter — 텍스트 전송\n' +
             'Ctrl+C / Ctrl+D — ^C / ^D 신호 전송\n' +
-            '↑/↓ — 히스토리 탐색'
+            '↑/↓ — 히스토리 탐색 / 세션 드롭다운\n' +
+            'Esc — 히스토리 드롭다운만 닫음 (바는 유지)\n\n' +
+            '── 빠른 연결 바 ──\n' +
+            'Enter — 연결\n' +
+            'Esc — 무시 (닫기는 ✕ 버튼으로만)'
           );
         }},
         { separator: true, label: '' },
@@ -1439,49 +1489,66 @@ function App() {
           let sessPath = '';
           try { sessPath = await (window as any).api.getSessionsPath(); } catch {}
           alert(
-          'PePe Terminal(SSH) v2.0.0\n\n' +
-          '만든이: Claude (feat. ghjeong[prompt])\n\n' +
+          'PePe Terminal(SSH) v2.0.4\n\n' +
+          '만든이: Claude (feat. ghjeong[prompt], HyungdukSeo)\n\n' +
           '── 터미널 기본 ──\n' +
           'SSH/SFTP 원격 접속 (비밀번호/키/Expect-Send 로그인)\n' +
+          'ProxyJump — primary 호스트 경유 점프 타겟 SSH+SFTP 직결\n' +
           '로컬 쉘 (PowerShell, CMD, Git Bash, WSL)\n' +
           '기본 쉘 설정 / 미니탭별 쉘 선택\n' +
           '테마 / 글꼴 / 인코딩(utf-8/cp949/euc-kr) 변경\n' +
-          '자동 재연결 (30초)\n' +
-          '터미널 투명도 / 데스크톱 투시 / Alt+Enter 전체화면\n\n' +
+          '자동 재연결 (30초), 초기 연결 watchdog (20초 × 3회 재시도)\n' +
+          '터미널 투명도 (0~100 슬라이더) / 데스크톱 투시 / Alt+Enter 전체화면\n\n' +
           '── 워크스페이스 / 패널 ──\n' +
           '다중 워크스페이스 탭\n' +
-          '분할 패널 (가로/세로), 드래그 리사이즈\n' +
+          '분할 패널 (가로/세로/타일 ⊞ N×ceil√N)\n' +
+          '플로팅 확대 (패널 전체화면 오버레이)\n' +
           '패널별 미니탭, 탭 간 드래그앤드롭\n' +
           '미니탭 휠 스크롤 / ‹ › 버튼\n' +
-          '탭별 선택 패널 기억 (재진입 시 자동 포커스)\n\n' +
+          '탭별 선택 패널 기억 (재진입 시 자동 포커스)\n' +
+          '선택된 패널 클릭 포커스 → 파일트리/Claude 컨텍스트 자동 전환\n\n' +
           '── 세션 관리 ──\n' +
-          '폴더 + 세션 혼합 정렬 (Ctrl+↑/↓ 이동)\n' +
+          '폴더 + 세션 혼합 정렬 (Ctrl+↑/↓ 이동, 다중 선택)\n' +
+          'Shift+클릭 범위 선택 / Ctrl+클릭 다중 선택\n' +
           '세션 가져오기/내보내기 (SecureCRT, Xshell)\n' +
-          '세션 클릭 토글 (encoding 창 열고 닫기)\n' +
-          '세션 편집 - 파일 트리 초기 경로 지정\n\n' +
+          '세션 재클릭으로 encoding 창 토글\n' +
+          'host:port 호버 플로팅 툴팁\n' +
+          '폴더 펼침/접힘 상태 영속화 (앱 재시작 후 유지)\n' +
+          '세션 편집:\n' +
+          '  - 파일트리 초기 경로 지정\n' +
+          '  - ProxyJump 점프 호스트 설정\n' +
+          '  - 파일트리 자동추적 옵션 (cd 시 동기화)\n' +
+          '  - 로그인 스크립트 (Expect/Send)\n\n' +
           '── 원격 파일 탐색/편집 (VS Code Remote 스타일) ──\n' +
-          '사이드바 원격 파일 트리 (SFTP)\n' +
+          '워크스페이스 공유 파일 트리 (선택된 패널 세션 기준)\n' +
+          '파일트리 핀/자동숨김 (📌 토글)\n' +
+          '파일트리 너비 드래그 리사이즈 (160~800px)\n' +
+          'SFTP 목록, mtime 정렬, 확장자별 색상/아이콘 (15+ 카테고리)\n' +
+          '다중 선택 (Ctrl/Shift+클릭) + 일괄 다운로드\n' +
+          '우클릭 메뉴: 파일 열기 / Claude 첨부 / 경로 복사 / 삭제\n' +
           'Monaco 에디터 탭 (구문강조, Ctrl+S 저장)\n' +
-          '듀얼 패널 파일 탐색기 / SFTP 드래그 전송\n' +
-          '파일 트리 우클릭 → Claude 첨부 / 경로 복사\n\n' +
+          '듀얼 패널 파일 탐색기 (SFTP/로컬 양방향) + ProxyJump 지원\n\n' +
           '── Claude Code 통합 ──\n' +
-          '우측 Claude 채팅 사이드바 (핀/자동숨김, 리사이즈)\n' +
-          'WebDAV 브리지 - 원격 SSH 를 로컬 UNC 로 실시간 마운트\n' +
-          'Unix 경로 자동 UNC 번역 ( /view/... → \\\\127.0.0.1@port\\... )\n' +
-          'MCP ssh_exec - Claude 가 원격 SSH 명령 실행 (cleartool 등)\n' +
+          '우측 Claude 채팅 사이드바 (핀/자동숨김, 드래그 리사이즈)\n' +
+          '세션/파일트리/Claude 모두 unpin 시 z-index 마우스호버 우선\n' +
+          'WebDAV 브리지 — 원격 SSH 를 로컬 UNC 로 실시간 마운트\n' +
+          'Unix 경로 자동 UNC 번역 (/view/... → \\\\127.0.0.1@port\\...)\n' +
+          'MCP ssh_exec — Claude 가 원격 SSH 명령 실행 (cleartool 등)\n' +
           '모델 선택 (Opus / Sonnet / Haiku / Opus Plan)\n' +
           '권한 모드 (편집 전 확인 / 자동 수락 / 계획 / 모두 허용)\n' +
-          'Plan 모드 + ExitPlanMode 승인 모달\n' +
+          'Plan 모드 + ExitPlanMode 승인 모달 (마크다운 렌더)\n' +
           'PreToolUse hooks 기반 툴 단위 승인 (체크박스)\n' +
           '대화 세션 이어가기 (--resume)\n' +
-          '로컬 파일/폴더 첨부 (드래그/선택)\n' +
-          '슬래시 명령 팔레트 (Context/Model/Permission/Slash)\n' +
-          '툴 타임라인 실시간 인디케이터\n\n' +
+          '로컬 파일/폴더 첨부 (📄+ / 📁+ webkitdirectory 재귀)\n' +
+          '슬래시 명령 팔레트 (Context/Model/Permission/Slash, 필터 + ↑↓ 네비)\n' +
+          '툴 타임라인 실시간 인디케이터 (⏳/✓/✕)\n' +
+          '채팅창 독립 폰트 설정 + Ctrl+Wheel 크기 조절\n\n' +
           '── 입력/브로드캐스트 ──\n' +
-          '텍스트 일괄 전송 (현재/보이는 탭/연결된 세션)\n' +
+          '텍스트 일괄 전송 (현재/보이는 탭/연결된 세션/전체 세션 lazy connect)\n' +
           '빠른 연결 바 (host/user/password/enc 즉석 접속)\n' +
           'Ctrl+C / Ctrl+D 브로드캐스트\n' +
-          '브로드캐스트 히스토리\n\n' +
+          '브로드캐스트 히스토리 (↑↓ 네비)\n' +
+          'Esc 로 바가 닫히지 않음 — 닫기는 ✕ 버튼으로만\n\n' +
           '── 찾기 / 검색 ──\n' +
           '터미널 찾기 (Ctrl+Shift+F), 이력, 하이라이트\n' +
           '이전 / 다음 네비게이션\n\n' +
@@ -1490,7 +1557,8 @@ function App() {
           '탐색기 우클릭 "Open here" 등록/해제\n' +
           '세션 저장 경로 변경\n' +
           '단축키 커스터마이즈\n' +
-          '터미널 설정 (word separator, scrollback 등)\n\n' +
+          '터미널 설정 (word separator, scrollback 등)\n' +
+          '내부 매뉴얼 뷰어 (docs/MANUAL.md)\n\n' +
           '── Windows 시스템 연동 ──\n' +
           '윈도우 프레임 없음 / 투명 / 최대화-복원\n' +
           '탐색기 "Open here" → 워크스페이스 해당 디렉토리 쉘\n\n' +
@@ -1510,7 +1578,17 @@ function App() {
 
   return (
     <div
-      className={`app-root${showBroadcast ? ' has-broadcast' : ''}${showQuickConnect ? ' has-quickconnect' : ''}${fullscreenTermId ? ' term-fullscreen' : ''}${showClaudeChat && claudeChatPinned ? ' has-claude-pinned' : ''}${showClaudeChat && !claudeChatPinned ? ' has-claude-autohide' : ''}`}
+      className={`app-root${showBroadcast ? ' has-broadcast' : ''}${showQuickConnect ? ' has-quickconnect' : ''}${fullscreenTermId ? ' term-fullscreen' : ''}${showClaudeChat && claudeChatPinned ? ' has-claude-pinned' : ''}${showClaudeChat && !claudeChatPinned ? ' has-claude-autohide' : ''}${topPanel ? ' top-panel-' + topPanel : ''}`}
+      onMouseMove={e => {
+        // 세션/파일트리 모두 unpinned 상태에서 마우스 위치에 따라 topPanel 전환
+        const t = e.target as HTMLElement | null;
+        if (!t || !t.closest) return;
+        if (t.closest('.session-sidebar-inner, .session-sidebar-trigger')) {
+          if (topPanel !== 'session') setTopPanel('session');
+        } else if (t.closest('.workspace-file-tree, .workspace-file-tree-trigger')) {
+          if (topPanel !== 'filetree') setTopPanel('filetree');
+        }
+      }}
       data-fs-term={fullscreenTermId || ''}
       style={{ ['--claude-chat-width' as any]: `${claudeChatWidth}px` }}
     >
@@ -1759,7 +1837,106 @@ function App() {
           </div>
         ))}
 
-        {activeTab && activeTab.type !== 'fileExplorer' && activeTab.type !== 'fileEditor' && (
+        {activeTab && activeTab.type !== 'fileExplorer' && activeTab.type !== 'fileEditor' && (() => {
+          // 워크스페이스 레벨 파일 트리 — 선택된 패널의 활성 세션이 SSH 연결이면 표시
+          let fileTreeNode: React.ReactNode = null;
+          if (selectedPanelId) {
+            const findLeaf = (n: any, id: string): any => {
+              if (n.type === 'leaf') return n.id === id ? n : null;
+              for (const c of n.children) { const r = findLeaf(c, id); if (r) return r; }
+              return null;
+            };
+            const leaf = findLeaf(activeTab.layout, selectedPanelId);
+            const sess = leaf?.panel?.sessions[leaf.panel.activeIdx];
+            if (sess?.sessionId && isTermConnected(sess.termId)) {
+              const onEnterTrigger = () => {
+                if (remoteTreePinned) return;
+                if (remoteTreeHideTimer.current) { clearTimeout(remoteTreeHideTimer.current); remoteTreeHideTimer.current = null; }
+                setRemoteTreeVisible(true);
+                setTopPanel('filetree');
+              };
+              const onEnterTree = () => {
+                if (remoteTreePinned) return;
+                if (remoteTreeHideTimer.current) { clearTimeout(remoteTreeHideTimer.current); remoteTreeHideTimer.current = null; }
+                setTopPanel('filetree');
+              };
+              const onLeaveTree = () => {
+                if (remoteTreePinned) return;
+                remoteTreeHideTimer.current = setTimeout(() => setRemoteTreeVisible(false), 500);
+              };
+              fileTreeNode = (
+                <>
+                  {!remoteTreePinned && (
+                    <div
+                      className="workspace-file-tree-trigger"
+                      onMouseEnter={onEnterTrigger}
+                      style={{ ['--file-tree-trigger-top' as any]: `${fileTreeTriggerTop}px` }}
+                    >
+                      <div className="workspace-file-tree-trigger-top">
+                        <span className="workspace-file-tree-trigger-text">📁 파일 트리</span>
+                      </div>
+                      <div className="workspace-file-tree-trigger-bottom" />
+                    </div>
+                  )}
+                  <div
+                    className={`workspace-file-tree ${!remoteTreePinned ? 'auto-hide' : ''} ${!remoteTreePinned && !remoteTreeVisible ? 'hidden' : ''} ${topPanel === 'filetree' ? 'top' : ''}`}
+                    style={{ width: `${remoteTreeWidth}px`, flexShrink: 0 }}
+                    onMouseEnter={onEnterTree}
+                    onMouseLeave={onLeaveTree}
+                  >
+                    <div className="workspace-file-tree-toolbar">
+                      <button
+                        className={`workspace-file-tree-pin ${remoteTreePinned ? 'pinned' : ''}`}
+                        onClick={() => setRemoteTreePinned(p => !p)}
+                        title={remoteTreePinned ? 'Unpin (자동 숨김)' : 'Pin (고정)'}
+                      >📌</button>
+                    </div>
+                    <RemoteFileTree
+                      key={sess.termId}
+                      termId={sess.termId}
+                      sessionName={sess.sessionName}
+                      sessionId={sess.sessionId}
+                      initialPath={getCurrentPwdForTerm(sess.termId)}
+                      onOpenFile={handleOpenRemoteFile}
+                      onAttachToClaude={handleAttachToClaude}
+                    />
+                    <div
+                      className="workspace-file-tree-resizer"
+                      title="드래그하여 너비 조절 (더블클릭: 기본값 240)"
+                      onMouseDown={e => {
+                        e.preventDefault();
+                        const startX = e.clientX;
+                        const startWidth = remoteTreeWidth;
+                        const onMove = (ev: MouseEvent) => {
+                          const w = Math.max(160, Math.min(800, startWidth + (ev.clientX - startX)));
+                          setRemoteTreeWidth(w);
+                        };
+                        const onUp = () => {
+                          window.removeEventListener('mousemove', onMove);
+                          window.removeEventListener('mouseup', onUp);
+                          setRemoteTreeWidth(curW => {
+                            if (remoteTreeWidthLoadedRef.current) { try { (window as any).api?.setUIPrefs?.({ remoteTreeWidth: curW }); } catch {} }
+                            return curW;
+                          });
+                          window.dispatchEvent(new Event('resize'));
+                        };
+                        window.addEventListener('mousemove', onMove);
+                        window.addEventListener('mouseup', onUp);
+                      }}
+                      onDoubleClick={() => {
+                        setRemoteTreeWidth(240);
+                        try { (window as any).api?.setUIPrefs?.({ remoteTreeWidth: 240 }); } catch {}
+                      }}
+                    />
+                  </div>
+                </>
+              );
+            }
+          }
+          return (
+            <div style={{ display: 'flex', flex: 1, minHeight: 0, position: 'relative' }}>
+              {fileTreeNode}
+              <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
           <Layout root={activeTab.layout}
             selectedPanelId={selectedPanelId}
             onSplit={(nodeId, dir) => openSplitSessionPicker(dir, nodeId)}
@@ -1789,7 +1966,10 @@ function App() {
             onOpenRemoteFile={handleOpenRemoteFile}
             onAttachToClaude={handleAttachToClaude}
           />
-        )}
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {showBroadcast && (
@@ -1814,7 +1994,11 @@ function App() {
               onChange={e => { setBroadcastText(e.target.value); setBroadcastShowHistory(false); }}
               onBlur={() => setTimeout(() => setBroadcastShowHistory(false), 150)}
               onKeyDown={e => {
-                if (e.key === 'Escape') { if (broadcastShowHistory) { setBroadcastShowHistory(false); return; } setShowBroadcast(false); return; }
+                if (e.key === 'Escape') {
+                  // Esc 는 히스토리 드롭다운만 닫고 바 자체는 유지 — 닫기는 ✕ 버튼으로만
+                  if (broadcastShowHistory) { e.preventDefault(); setBroadcastShowHistory(false); }
+                  return;
+                }
                 if (e.key === 'ArrowDown' && !broadcastShowHistory) {
                   if (broadcastHistory.length > 0) { e.preventDefault(); setBroadcastShowHistory(true); setBroadcastHistoryIdx(0); setBroadcastText(broadcastHistory[0]); }
                   return;

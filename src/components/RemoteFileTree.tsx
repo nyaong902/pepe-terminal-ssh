@@ -1,5 +1,6 @@
 // src/components/RemoteFileTree.tsx
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { subscribePwdChange } from './TerminalPanel';
 
 // 확장자 → 카테고리. CSS 에서 data-cat 으로 색상 매칭.
 const EXT_CAT: Record<string, string> = {
@@ -175,6 +176,21 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
     setPathInput(cleanPath);
     setCollapsed(new Set());
   }, [loadChildren]);
+
+  // 터미널에서 cd 발생 시 (OSC 7 hook) 자동으로 해당 경로로 네비게이트
+  useEffect(() => {
+    const dispose = subscribePwdChange(termId, (pwd) => {
+      if (!pwd) return;
+      // 현재 표시된 root.path 와 다를 때만 navigate
+      setRoot(r => {
+        if (r?.path === pwd) return r;
+        // 비동기 navigate 실행
+        navigateTo(pwd).catch(() => {});
+        return r;
+      });
+    });
+    return () => { dispose(); };
+  }, [termId, navigateTo]);
 
   // 초기 경로 로드 — initialPath 조회 완료 후에만 실행
   useEffect(() => {

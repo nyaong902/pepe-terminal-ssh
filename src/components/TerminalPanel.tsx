@@ -52,22 +52,33 @@ const sshInitialized = new Set<string>();
 const globalConnected = new Set<string>();
 const connectedListeners = new Set<() => void>();
 // IME 조합 상태: 조합 중에는 onData를 건너뛰고, 완료 시 최종 텍스트를 1회 전송
-// 각 터미널(session)별 파일 트리 표시 여부. Ctrl+Shift+E 로 toggleTreeVisibleForTerm 이 호출됨.
-const termTreeVisible: Map<string, boolean> = new Map();
+// 파일 트리 표시 여부 — 전역 플래그 (예전엔 termId 별 Map 이었는데 패널 전환 시
+// 각 패널이 따로 토글 상태 가져서 불편 → 전체 앱 단위 단일 값으로 변경).
+let globalTreeVisible = true;
 const treeVisibleChangeListeners: Set<() => void> = new Set();
-export function isTreeVisibleForTerm(termId: string): boolean {
-  return termTreeVisible.get(termId) || false;
+export function isTreeVisibleForTerm(_termId: string): boolean {
+  return globalTreeVisible;
 }
-export function toggleTreeVisibleForTerm(termId: string) {
-  termTreeVisible.set(termId, !termTreeVisible.get(termId));
+export function toggleTreeVisibleForTerm(_termId: string) {
+  globalTreeVisible = !globalTreeVisible;
   treeVisibleChangeListeners.forEach(fn => fn());
 }
 
 // 각 터미널(세션)의 현재 원격 디렉토리. sshBridge 에서 주입한 OSC 7 hook 의 출력을
 // xterm 의 OSC 핸들러가 여기에 저장. 트리 열 때 initialPath 로 사용.
 const termCurrentPwd: Map<string, string> = new Map();
+const pwdChangeListeners: Map<string, Set<(pwd: string) => void>> = new Map();
 export function getCurrentPwdForTerm(termId: string): string | undefined {
   return termCurrentPwd.get(termId);
+}
+export function subscribePwdChange(termId: string, fn: (pwd: string) => void): () => void {
+  let set = pwdChangeListeners.get(termId);
+  if (!set) { set = new Set(); pwdChangeListeners.set(termId, set); }
+  set.add(fn);
+  return () => { set?.delete(fn); };
+}
+function notifyPwdChange(termId: string, pwd: string) {
+  pwdChangeListeners.get(termId)?.forEach(fn => { try { fn(pwd); } catch {} });
 }
 
 const termIMEComposing: Map<string, boolean> = new Map();
@@ -145,7 +156,9 @@ function getOrCreateTerm(termId: string): { term: Terminal; fit: FitAddon; searc
         if (m) {
           let p = m[1];
           try { p = decodeURIComponent(p); } catch { /* keep encoded */ }
+          const prev = termCurrentPwd.get(termId);
           termCurrentPwd.set(termId, p);
+          if (prev !== p) notifyPwdChange(termId, p);
         }
         return true;
       });
@@ -1061,12 +1074,13 @@ type Props = {
   onAttachToClaude?: (termId: string, remotePath: string, fileName: string, isDir: boolean) => void;
   isFloating?: boolean;
   onToggleFloat?: (nodeId: string) => void;
+  isSelected?: boolean;
 };
 
 export const TerminalPanel: React.FC<Props> = ({
   nodeId, panel, onSplit, onClose, onSelect, onSwitchSession, onCloseSession, onMoveSession, onSplitMoveSession, onReorderSession, onAddSession, onRenameSession, onConnectDrop, onDuplicateSession, availableShells,
   treeWidth = 240, onTreeWidthChange, onOpenRemoteFile, onAttachToClaude,
-  isFloating, onToggleFloat,
+  isFloating, onToggleFloat, isSelected: _isSelected,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mountedTermRef = useRef<string | null>(null);
@@ -1373,6 +1387,7 @@ export const TerminalPanel: React.FC<Props> = ({
   return (
     <div
       style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', position: 'relative' }}
+      onMouseDownCapture={() => onSelect?.(nodeId)}
       onDragOver={e => {
         if (e.dataTransfer.types.includes('text/mini-session') || e.dataTransfer.types.includes('text/session-id')) {
           e.preventDefault();
@@ -1581,8 +1596,8 @@ export const TerminalPanel: React.FC<Props> = ({
       </div>
       <div className="panel-terminal-split">
         {(() => {
-          const treeVisible = !!activeTermId && isTreeVisibleForTerm(activeTermId);
-          const canShowTree = treeVisible && !!activeSession?.sessionId && !!activeTermId && isTermConnected(activeTermId);
+          // 파일 트리는 워크스페이스 레벨(App.tsx)에서 공통으로 렌더 → 패널 내부에선 표시 안 함
+          const canShowTree = false;
           return (
             <>
               {canShowTree && (
@@ -1619,7 +1634,7 @@ export const TerminalPanel: React.FC<Props> = ({
                   />
                 </div>
               )}
-              <div ref={containerRef} className="panel-terminal-area" />
+              <div ref={containerRef} className="panel-terminal-area" onMouseDown={() => onSelect?.(nodeId)} />
             </>
           );
         })()}

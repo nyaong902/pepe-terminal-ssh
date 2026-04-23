@@ -281,15 +281,17 @@ class SSHBridge extends EventEmitter {
 
       this.clients.set(panelId, { conn, stream, encoding: initialEncoding, primaryConn });
 
-      const injectDelay = session.loginScript && session.loginScript.length > 0 ? 3500 : 800;
-      setTimeout(() => {
-        try {
-          // OSC 9 (셸 검출) 출력 후 전체 화면 clear + 커서 홈(1,1) 이동. cls 한 것처럼 깨끗.
-          // \033[H = 커서 홈, \033[2J = 전체 화면 erase. 스크롤백은 유지됨.
-          const detect = ` printf '\\033]9;pepe-shell:%s\\033\\134\\033[H\\033[2J' "$SHELL"\n`;
-          stream.write(detect);
-        } catch {}
-      }, injectDelay);
+      // 세션 옵션 autoTrackPwd 가 켜져 있으면 OSC 9/7 hook 주입 — 터미널에서 cd 하면 파일 트리 자동 추적.
+      // 옵션 꺼져 있으면(기본) 주입하지 않아 화면에 명령 노출 없음, MOTD 완전 보존.
+      if (session.autoTrackPwd) {
+        const injectDelay = session.loginScript && session.loginScript.length > 0 ? 3500 : 800;
+        setTimeout(() => {
+          try {
+            const detect = ` printf '\\033]9;pepe-shell:%s\\033\\134\\033[1A\\033[2K\\r' "$SHELL"\n`;
+            stream.write(detect);
+          } catch {}
+        }, injectDelay);
+      }
     });
   }
 
@@ -352,21 +354,15 @@ class SSHBridge extends EventEmitter {
     if (!rec) return;
     const shell = (shellPath || '').toLowerCase();
     let cmd = '';
-    // 순서 중요: zsh/csh/tcsh 모두 'sh' 문자열 포함 → 구체적 셸부터 검사.
-    // 호스트명은 localhost 로 고정 — 파서는 path 부분만 사용하므로 무관하고,
-    // tcsh 의 $HOST 미정의 에러를 피하려는 목적.
-    // OSC 7 hook 주입 명령 이후 전체 화면 clear + 커서 홈 이동 (cls 같은 효과).
-    // 좁은 분할에서 wrap 된 긴 명령줄까지 통째로 지움. 스크롤백은 유지.
-    const clearLine = `; printf '\\033[H\\033[2J'`;
+    // 명령 끝에 ; printf '\033[1A\033[2K\r' 로 주입 명령 echo 1줄 erase (MOTD 보존).
+    const clearLine = `; printf '\\033[1A\\033[2K\\r'`;
     if (shell.includes('zsh')) {
       cmd = ` precmd_pepe_osc7(){ printf '\\033]7;file://localhost%s\\033\\134' "$PWD" }; typeset -ga precmd_functions; precmd_functions+=(precmd_pepe_osc7)${clearLine}\n`;
     } else if (shell.includes('tcsh') || shell.includes('csh')) {
-      // csh / tcsh — alias precmd 는 tcsh 기능.
       cmd = ` alias precmd 'printf "\\033]7;file://localhost%s\\033\\134" "$cwd"'${clearLine}\n`;
     } else if (shell.includes('bash') || shell.endsWith('/sh') || shell === 'sh') {
       cmd = ` PROMPT_COMMAND='printf "\\033]7;file://localhost%s\\033\\134" "$PWD"'${clearLine}\n`;
     } else {
-      // 지원 안 하는 셸 (fish 등) — 조용히 무시
       return;
     }
     try { rec.stream.write(cmd); } catch {}

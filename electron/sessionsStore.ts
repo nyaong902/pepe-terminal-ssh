@@ -25,6 +25,7 @@ export type Session = {
   scrollback?: number;
   icon?: string;
   initialPath?: string; // SSH 연결 시 파일 트리 초기 경로 (없으면 홈 디렉토리)
+  autoTrackPwd?: boolean; // 터미널에서 cd 하면 파일 트리도 자동 따라감 (OSC 7 hook 주입)
   // 점프 호스트 설정 (ProxyJump). 채우면 primary 호스트를 경유해서 점프 타겟으로 SSH+SFTP 직결.
   // primary 호스트의 ~/.ssh/ 에 등록된 키를 자동으로 읽어서 점프 타겟 인증에 재사용.
   // 비우면 기존처럼 primary 직접 연결.
