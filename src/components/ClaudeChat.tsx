@@ -1,6 +1,7 @@
 // src/components/ClaudeChat.tsx
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { marked } from 'marked';
+import { adjustClaudeFontSize } from '../utils/claudeFont';
 
 type Message = {
   role: 'user' | 'assistant';
@@ -90,6 +91,20 @@ export const ClaudeChat: React.FC<Props> = ({ onClose, pendingContext, onContext
   // 로컬 파일 첨부 (사용자 PC 파일 내용)
   const [localFileAttachments, setLocalFileAttachments] = useState<{ name: string; content: string }[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // ClaudeChat 은 installed 상태에 따라 여러 return 분기를 가져서 ref 부착 시점이 변함.
+  // 안정적으로 listener 를 붙이기 위해 document 전체에서 target 이 claude-chat-container 내부인지
+  // 확인하는 방식으로 wheel 을 처리.
+  useEffect(() => {
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      const t = e.target as HTMLElement | null;
+      if (!t || !t.closest || !t.closest('.claude-chat-sidebar, .claude-chat-container')) return;
+      e.preventDefault();
+      adjustClaudeFontSize(e.deltaY < 0 ? 1 : -1);
+    };
+    window.addEventListener('wheel', onWheel, { passive: false });
+    return () => { window.removeEventListener('wheel', onWheel); };
+  }, []);
   const currentAsstIdRef = useRef<string | null>(null);
 
   // CLI 설치 확인

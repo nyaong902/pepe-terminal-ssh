@@ -15,6 +15,7 @@ import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearA
 import { marked } from 'marked';
 // @ts-ignore — vite ?raw 로 docs/MANUAL.md 를 번들 문자열로 임베드
 import manualMd from '../docs/MANUAL.md?raw';
+import { getClaudeFontFamily, getClaudeFontSize, setClaudeFontFamily, setClaudeFontSize, applyClaudeFontVars } from './utils/claudeFont';
 import { getTerminalSettings, saveTerminalSettings, TerminalSettings } from './utils/terminalSettings';
 import { loadKeybindings, matchKeybinding, getKeybindings, DEFAULT_KEYBINDINGS, KEYBINDING_LABELS, keyEventToCombo, setKeybindingListening } from './utils/keybindings';
 import { getThemeList } from './utils/terminalThemes';
@@ -395,6 +396,19 @@ function App() {
     (window as any).api?.windowIsMaximized?.().then((m: boolean) => setIsMaximized(!!m)).catch(() => {});
     const off = (window as any).api?.onWindowMaximized?.((m: boolean) => setIsMaximized(!!m));
     return () => { try { off?.(); } catch {} };
+  }, []);
+  // Claude 채팅 전용 폰트/크기 — 터미널과 독립 설정 (src/utils/claudeFont)
+  const [claudeFontFamily, setClaudeFontFamilyState] = useState(() => getClaudeFontFamily());
+  const [claudeFontSize, setClaudeFontSizeState] = useState(() => getClaudeFontSize());
+  useEffect(() => { applyClaudeFontVars(); }, []);
+  // ClaudeChat 의 Ctrl+Wheel 이 외부에서 변경 시 옵션 창 값 동기화용
+  useEffect(() => {
+    const onChange = () => {
+      setClaudeFontFamilyState(getClaudeFontFamily());
+      setClaudeFontSizeState(getClaudeFontSize());
+    };
+    window.addEventListener('claude-font-changed', onChange);
+    return () => window.removeEventListener('claude-font-changed', onChange);
   }, []);
   // main 프로세스 디버그 로그를 DevTools Console 로 포워딩
   useEffect(() => {
@@ -1938,6 +1952,34 @@ function App() {
                     style={{ width: 100, background: '#1a1a1a', color: '#eee', border: '1px solid #333', borderRadius: 4, padding: '8px', fontSize: 14, fontFamily: 'monospace', boxSizing: 'border-box' }}
                     value={optFontSize}
                     onChange={e => setOptFontSize(Math.max(8, Math.min(40, Number(e.target.value) || 14)))}
+                  />
+                </div>
+                <div style={{ marginBottom: 16, borderTop: '1px solid #333', paddingTop: 12 }}>
+                  <div style={{ color: '#ccc', fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Claude 채팅창 글꼴</div>
+                  <p style={{ color: '#888', fontSize: 12, margin: '0 0 6px' }}>터미널과 독립 설정. 채팅창에서 Ctrl+휠로도 크기 조절.</p>
+                  <select
+                    style={{ width: '100%', background: '#1a1a1a', color: '#eee', border: '1px solid #333', borderRadius: 4, padding: '8px', fontSize: 14, boxSizing: 'border-box', cursor: 'pointer' }}
+                    value={claudeFontFamily}
+                    onChange={e => { setClaudeFontFamily(e.target.value); setClaudeFontFamilyState(e.target.value); }}
+                  >
+                    <option value="">기본 (시스템 UI 폰트)</option>
+                    {availableFonts.map(f => <option key={f} value={f} style={{ fontFamily: `"${f}", sans-serif` }}>{f}</option>)}
+                  </select>
+                </div>
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ color: '#ccc', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Claude 채팅창 글꼴 크기</div>
+                  <input
+                    type="number"
+                    min={9}
+                    max={32}
+                    step={1}
+                    style={{ width: 100, background: '#1a1a1a', color: '#eee', border: '1px solid #333', borderRadius: 4, padding: '8px', fontSize: 14, fontFamily: 'monospace', boxSizing: 'border-box' }}
+                    value={claudeFontSize}
+                    onChange={e => {
+                      const v = Math.max(9, Math.min(32, Number(e.target.value) || 13));
+                      setClaudeFontSize(v);
+                      setClaudeFontSizeState(v);
+                    }}
                   />
                 </div>
                 <div style={{ marginBottom: 16 }}>
