@@ -11,6 +11,7 @@ export const DEFAULT_KEYBINDINGS: Record<string, string> = {
   'clearScrollback': 'Ctrl+Shift+B',
   'clearScreen': 'Ctrl+Shift+L',
   'clearAll': 'Ctrl+Shift+A',
+  'toggleFileTree': 'Ctrl+Shift+E',
 };
 
 // Action labels for UI
@@ -26,6 +27,7 @@ export const KEYBINDING_LABELS: Record<string, string> = {
   'clearScrollback': '스크롤백 지우기',
   'clearScreen': '화면 지우기',
   'clearAll': '전체 지우기',
+  'toggleFileTree': '파일 트리 토글',
 };
 
 // Current keybindings (merged with defaults)

@@ -34,6 +34,48 @@ export const FileExplorer: React.FC<Props> = ({ sessions }) => {
     return saved ? Number(saved) : 120;
   });
   const resizing = React.useRef<{ startY: number; startH: number } | null>(null);
+  // 세션 ID → 폴더 이름 매핑 (드롭다운 label 에 폴더 접두사 붙이기용)
+  const [sessionFolderMap, setSessionFolderMap] = useState<Record<string, string>>({});
+  // 전체 세션 리스트 (드롭다운 확장용 — 미연결 포함)
+  const [allSessionsList, setAllSessionsList] = useState<any[]>([]);
+  // lazy 연결로 생성된 SFTP 임시 connId — FileExplorer unmount 시 정리
+  const [lazyConns, setLazyConns] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const data: any = await api.listSessions?.();
+        if (cancelled) return;
+        const allSessions: any[] = data?.sessions ?? [];
+        const folders: any[] = data?.folders ?? [];
+        setAllSessionsList(allSessions);
+        const folderById: Record<string, any> = {};
+        for (const f of folders) folderById[f.id] = f;
+        const folderPath = (fid?: string): string => {
+          if (!fid) return '';
+          const f = folderById[fid];
+          if (!f) return '';
+          const parent = folderPath(f.parentId);
+          return parent ? `${parent}/${f.name}` : f.name;
+        };
+        const map: Record<string, string> = {};
+        for (const s of allSessions) map[s.id] = folderPath(s.folderId);
+        setSessionFolderMap(map);
+      } catch {}
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [sessions.length]);
+
+  // 언마운트 시 lazy 연결 정리
+  useEffect(() => {
+    return () => {
+      for (const cid of lazyConns) {
+        try { api?.feSftpDisconnect?.(cid); } catch {}
+      }
+    };
+  }, [lazyConns]);
 
   // 초기 경로
   useEffect(() => {
@@ -131,12 +173,24 @@ export const FileExplorer: React.FC<Props> = ({ sessions }) => {
   const sessKey = sessions.map(s => s.termId).join(',');
   useEffect(() => {
     const newSources: PanelSource[] = [{ mode: 'local', label: '🖥️ 로컬' }];
+    // 이미 터미널로 연결된 세션의 sessionId
+    const connectedSessionIds = new Set(sessions.map(s => s.sessionId).filter(Boolean));
+    // 1) 이미 연결된 세션을 먼저 🟢 로 추가
     for (const sess of sessions) {
-      newSources.push({ mode: 'remote', termId: sess.termId, label: `🌐 ${sess.sessionName}` });
+      const folder = sessionFolderMap[sess.sessionId];
+      const label = folder ? `🟢 ${sess.sessionName}  [${folder}]` : `🟢 ${sess.sessionName}`;
+      newSources.push({ mode: 'remote', termId: sess.termId, sessionId: sess.sessionId, label });
     }
-    // 기존 수동 SFTP 연결 유지
+    // 2) 미연결 세션을 ⚪ (lazy-remote) 로 추가 — 선택 시 자동 백그라운드 SFTP 연결
+    for (const s of allSessionsList) {
+      if (connectedSessionIds.has(s.id)) continue;
+      const folder = sessionFolderMap[s.id];
+      const label = folder ? `⚪ ${s.name}  [${folder}] (${s.host})` : `⚪ ${s.name} (${s.host})`;
+      newSources.push({ mode: 'lazy-remote', sessionId: s.id, label });
+    }
+    // 3) 기존 수동 SFTP 연결(🔌) 유지
     for (const s of sources) {
-      if (s.label?.startsWith('🔌') && !newSources.find(n => n.termId === s.termId)) {
+      if (s.label?.startsWith('🔌') && s.mode === 'remote' && !newSources.find(n => n.termId === s.termId)) {
         newSources.push(s);
       }
     }
@@ -161,7 +215,7 @@ export const FileExplorer: React.FC<Props> = ({ sessions }) => {
       };
       tryGetHome(10);
     }
-  }, [sessKey, initDone]);
+  }, [sessKey, initDone, sessionFolderMap, allSessionsList]);
 
   const sep = (source: PanelSource) => source.mode === 'local' && navigator.platform.startsWith('Win') ? '\\' : '/';
 
@@ -177,14 +231,63 @@ export const FileExplorer: React.FC<Props> = ({ sessions }) => {
     return mode === 'local' ? 'C:\\' : '/';
   };
 
+  // lazy-remote 소스를 실제 연결된 remote 소스로 변환. 실패 시 null 반환.
+  const realizeLazyRemote = async (src: PanelSource): Promise<PanelSource | null> => {
+    if (src.mode !== 'lazy-remote' || !src.sessionId) return null;
+    const sess = allSessionsList.find(s => s.id === src.sessionId);
+    if (!sess) { alert('세션 정보를 찾을 수 없습니다'); return null; }
+    const connId = `fe-lazy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const jumpOpts = sess.jumpTargetHost?.trim()
+      ? { host: sess.jumpTargetHost.trim(), user: sess.jumpTargetUser || 'root', port: Number(sess.jumpTargetPort) || 22, password: sess.jumpTargetPassword || undefined }
+      : undefined;
+    try {
+      const r: any = await api?.feSftpConnect?.(connId, sess.host, sess.port || 22, sess.username, sess.auth, jumpOpts);
+      if (!r?.success) {
+        alert(`연결 실패 (${sess.name}): ${r?.error || '알 수 없는 오류'}`);
+        return null;
+      }
+    } catch (err: any) {
+      alert(`연결 실패 (${sess.name}): ${err?.message || err}`);
+      return null;
+    }
+    setLazyConns(prev => [...prev, connId]);
+    const folder = sessionFolderMap[sess.id];
+    const label = folder ? `🟢 ${sess.name}  [${folder}]` : `🟢 ${sess.name}`;
+    const newSrc: PanelSource = { mode: 'remote', termId: connId, sessionId: sess.id, label };
+    // 소스 리스트 업데이트 — lazy 항목 제거하고 연결된 항목 추가
+    setSources(prev => {
+      const filtered = prev.filter(s => !(s.mode === 'lazy-remote' && s.sessionId === sess.id));
+      // '직접 연결' 항목 앞에 삽입
+      const idx = filtered.findIndex(s => (s.mode as any) === 'sftp-connect');
+      const arr = [...filtered];
+      if (idx >= 0) arr.splice(idx, 0, newSrc); else arr.push(newSrc);
+      return arr;
+    });
+    return newSrc;
+  };
+
   const handleLeftSourceChange = async (src: PanelSource) => {
     if (src.mode === 'sftp-connect' as any) { setShowSftpConnect('left'); return; }
+    if (src.mode === 'lazy-remote') {
+      const real = await realizeLazyRemote(src);
+      if (!real) return;
+      setLeftSource(real);
+      setLeftPath(await getHomeWithRetry('remote', real.termId));
+      return;
+    }
     setLeftSource(src);
     setLeftPath(await getHomeWithRetry(src.mode, src.termId));
   };
 
   const handleRightSourceChange = async (src: PanelSource) => {
     if (src.mode === 'sftp-connect' as any) { setShowSftpConnect('right'); return; }
+    if (src.mode === 'lazy-remote') {
+      const real = await realizeLazyRemote(src);
+      if (!real) return;
+      setRightSource(real);
+      setRightPath(await getHomeWithRetry('remote', real.termId));
+      return;
+    }
     setRightSource(src);
     setRightPath(await getHomeWithRetry(src.mode, src.termId));
   };

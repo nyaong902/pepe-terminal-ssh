@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import type { Panel, PanelSession } from '../utils/layoutUtils';
 import { ContextMenu } from './ContextMenu';
+import { RemoteFileTree } from './RemoteFileTree';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { SearchAddon } from 'xterm-addon-search';
@@ -51,6 +52,24 @@ const sshInitialized = new Set<string>();
 const globalConnected = new Set<string>();
 const connectedListeners = new Set<() => void>();
 // IME 조합 상태: 조합 중에는 onData를 건너뛰고, 완료 시 최종 텍스트를 1회 전송
+// 각 터미널(session)별 파일 트리 표시 여부. Ctrl+Shift+E 로 toggleTreeVisibleForTerm 이 호출됨.
+const termTreeVisible: Map<string, boolean> = new Map();
+const treeVisibleChangeListeners: Set<() => void> = new Set();
+export function isTreeVisibleForTerm(termId: string): boolean {
+  return termTreeVisible.get(termId) || false;
+}
+export function toggleTreeVisibleForTerm(termId: string) {
+  termTreeVisible.set(termId, !termTreeVisible.get(termId));
+  treeVisibleChangeListeners.forEach(fn => fn());
+}
+
+// 각 터미널(세션)의 현재 원격 디렉토리. sshBridge 에서 주입한 OSC 7 hook 의 출력을
+// xterm 의 OSC 핸들러가 여기에 저장. 트리 열 때 initialPath 로 사용.
+const termCurrentPwd: Map<string, string> = new Map();
+export function getCurrentPwdForTerm(termId: string): string | undefined {
+  return termCurrentPwd.get(termId);
+}
+
 const termIMEComposing: Map<string, boolean> = new Map();
 // 조합 완료 직후 xterm이 동일 문자열로 onData를 한 번 더 발화할 수 있어 중복 차단용
 const termJustComposed: Map<string, { text: string; at: number }> = new Map();
@@ -119,6 +138,18 @@ function getOrCreateTerm(termId: string): { term: Terminal; fit: FitAddon; searc
     term.loadAddon(search);
     term.loadAddon(unicode11);
     term.unicode.activeVersion = '11';
+    // OSC 7 핸들러 — 원격 쉘이 보낸 file://host/path 를 파싱해서 현재 pwd 저장
+    try {
+      (term as any).parser?.registerOscHandler?.(7, (data: string) => {
+        const m = data.match(/^file:\/\/[^/]*(\/.*)$/);
+        if (m) {
+          let p = m[1];
+          try { p = decodeURIComponent(p); } catch { /* keep encoded */ }
+          termCurrentPwd.set(termId, p);
+        }
+        return true;
+      });
+    } catch { /* older xterm 없으면 무시 */ }
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
       // 단축키 변경 중이면 모든 키 통과
@@ -671,6 +702,7 @@ function ensureSSHSetup(termId: string) {
     }
     globalConnected.add(termId);
     cancelReconnect(termId);
+    clearInitialConnectWatchdog(termId);
     reconnectUserCancelled.delete(termId);
     notifyConnectedChange();
     try { fit.fit(); } catch {}
@@ -707,7 +739,11 @@ function ensureSSHSetup(termId: string) {
     sshConnecting.delete(termId);
     globalConnected.delete(termId);
     notifyConnectedChange();
-    try { term.write(`\r\n\x1b[91mSSH 오류: ${p.error || 'Unknown error'}\x1b[0m\r\n`); } catch {}
+    // 초기 연결 watchdog 이 재시도할 수 있도록 즉시 트리거 (transient 에러 회복)
+    const ok = tryInitialReconnect(termId);
+    if (!ok) {
+      try { term.write(`\r\n\x1b[91mSSH 오류: ${p.error || 'Unknown error'}\x1b[0m\r\n`); } catch {}
+    }
   });
 
   // 비밀번호 미저장 세션: keyboard-interactive 인증 프롬프트
@@ -794,6 +830,79 @@ export function getTermSessionInfo(termId: string) {
 
 export function registerTermSession(termId: string, sessionId: string, sessionName?: string, host?: string, quickSession?: any) {
   termSessionMap.set(termId, { sessionId, sessionName: sessionName ?? '', host: host ?? '', quickSession });
+}
+
+// 초기 연결 watchdog — N초 내 연결 안되면 최대 3회 자동 재시도.
+// onSSHConnected 시 해제, onSSHError 시 즉시 재시도 발동.
+// Solaris 처럼 KEX 연산 느린 서버가 동시 다수 접속 시 10초도 부족 → 20초로 증가.
+const INITIAL_CONNECT_TIMEOUT_MS = 20000;
+const INITIAL_CONNECT_MAX_ATTEMPTS = 3;
+const INITIAL_CONNECT_RETRY_GAP_MS = 5000;
+const initialConnectWatchdog: Map<string, { timer: ReturnType<typeof setTimeout>; sessionId: string; cols?: number; rows?: number }> = new Map();
+const initialConnectAttempts: Map<string, number> = new Map();
+
+export function startInitialConnectWatchdog(termId: string, sessionId: string, cols?: number, rows?: number) {
+  // 기존 타이머가 있으면 해제 (중복 장전 방지)
+  const existing = initialConnectWatchdog.get(termId);
+  if (existing) clearTimeout(existing.timer);
+  const attempts = (initialConnectAttempts.get(termId) || 0) + 1;
+  initialConnectAttempts.set(termId, attempts);
+  const timer = setTimeout(() => {
+    if (globalConnected.has(termId)) {
+      clearInitialConnectWatchdog(termId);
+      return;
+    }
+    fireInitialReconnect(termId, '10초 응답 없음');
+  }, INITIAL_CONNECT_TIMEOUT_MS);
+  initialConnectWatchdog.set(termId, { timer, sessionId, cols, rows });
+}
+
+export function clearInitialConnectWatchdog(termId: string) {
+  const w = initialConnectWatchdog.get(termId);
+  if (w) { clearTimeout(w.timer); initialConnectWatchdog.delete(termId); }
+  initialConnectAttempts.delete(termId);
+}
+
+// 초기 재연결 시도 — watchdog 가 있으면 발동. 반환값은 재시도 가능했는지 여부.
+export function tryInitialReconnect(termId: string): boolean {
+  if (!initialConnectWatchdog.has(termId)) return false;
+  fireInitialReconnect(termId, '에러');
+  return true;
+}
+
+function fireInitialReconnect(termId: string, reason: string) {
+  const w = initialConnectWatchdog.get(termId);
+  if (!w) return; // 이미 처리 중이면 skip (재진입 방지)
+  clearTimeout(w.timer);
+  initialConnectWatchdog.delete(termId); // 재시도 중엔 watchdog 없음 → 재진입 방지
+  const entry = termStore.get(termId);
+  const attempts = initialConnectAttempts.get(termId) || 1;
+  if (attempts >= INITIAL_CONNECT_MAX_ATTEMPTS) {
+    initialConnectAttempts.delete(termId);
+    try { entry?.term.write(`\r\n\x1b[91m연결 실패 (${INITIAL_CONNECT_MAX_ATTEMPTS}회 재시도 후 포기) — ${reason}\x1b[0m\r\n`); } catch {}
+    sshConnecting.delete(termId);
+    return;
+  }
+  try { entry?.term.write(`\r\n\x1b[33m${reason} — 자동 재시도 ${attempts}/${INITIAL_CONNECT_MAX_ATTEMPTS - 1} (${INITIAL_CONNECT_RETRY_GAP_MS / 1000}초 대기)\x1b[0m\r\n`); } catch {}
+  try { window.api?.disconnectSSH?.(termId); } catch {}
+  sshConnecting.delete(termId);
+  // 재시도 대기 — bastion sshd MaxStartups 가 drop 한 경우 앞선 세션이 인증 완료할 시간
+  setTimeout(() => {
+    sshConnecting.add(termId);
+    window.api?.connectSSH?.(termId, w.sessionId, w.cols, w.rows)?.then((r: string) => {
+      if (r === 'need-password') {
+        sshConnecting.delete(termId);
+        const cached = termPasswordCache.get(termId);
+        if (cached) {
+          sshConnecting.add(termId);
+          window.api?.connectSSHWithPassword?.(termId, w.sessionId, cached, w.cols || 80, w.rows || 24);
+        } else {
+          promptPasswordAndConnect(termId, w.sessionId, w.cols, w.rows);
+        }
+      }
+    }).catch(() => {});
+    startInitialConnectWatchdog(termId, w.sessionId, w.cols, w.rows);
+  }, INITIAL_CONNECT_RETRY_GAP_MS);
 }
 
 function startReconnectCountdown(termId: string) {
@@ -945,10 +1054,19 @@ type Props = {
   onRenameSession?: (nodeId: string, termId: string, name: string) => void;
   onConnectDrop?: (nodeId: string, sessionId: string) => void;
   onDuplicateSession?: (nodeId: string, termId: string) => void;
+  // 파일 트리 관련 (패널 내부 분할 렌더)
+  treeWidth?: number;
+  onTreeWidthChange?: (w: number) => void;
+  onOpenRemoteFile?: (termId: string, remotePath: string, fileName: string) => void;
+  onAttachToClaude?: (termId: string, remotePath: string, fileName: string, isDir: boolean) => void;
+  isFloating?: boolean;
+  onToggleFloat?: (nodeId: string) => void;
 };
 
 export const TerminalPanel: React.FC<Props> = ({
   nodeId, panel, onSplit, onClose, onSelect, onSwitchSession, onCloseSession, onMoveSession, onSplitMoveSession, onReorderSession, onAddSession, onRenameSession, onConnectDrop, onDuplicateSession, availableShells,
+  treeWidth = 240, onTreeWidthChange, onOpenRemoteFile, onAttachToClaude,
+  isFloating, onToggleFloat,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mountedTermRef = useRef<string | null>(null);
@@ -964,6 +1082,13 @@ export const TerminalPanel: React.FC<Props> = ({
     const listener = () => forceUpdate(n => n + 1);
     connectedListeners.add(listener);
     return () => { connectedListeners.delete(listener); };
+  }, []);
+
+  // 파일 트리 표시 토글 이벤트 구독 (Ctrl+Shift+E 로 외부에서 호출됨)
+  useEffect(() => {
+    const fn = () => forceUpdate(n => n + 1);
+    treeVisibleChangeListeners.add(fn);
+    return () => { treeVisibleChangeListeners.delete(fn); };
   }, []);
 
   // SSH 리스너 설정
@@ -1064,6 +1189,7 @@ export const TerminalPanel: React.FC<Props> = ({
           term.clear();
         }
         sshConnecting.add(activeTermId);
+        startInitialConnectWatchdog(activeTermId, activeSession.sessionId, cols, rows);
         try {
           const result = await window.api?.connectSSH?.(activeTermId, activeSession.sessionId, cols, rows);
           console.log('[initConnect] connectSSH result:', result);
@@ -1389,22 +1515,29 @@ export const TerminalPanel: React.FC<Props> = ({
           </span>
         )}
 
-        <div className="panel-opacity-hslider" onClick={e => e.stopPropagation()}>
-          {[0,20,40,60,80,100].map(v => {
-            const cur = Math.round((termOpacity.get(activeTermId || nodeId) ?? 1.0) * 100);
-            return <div key={v}
-              className={`panel-opacity-hstep ${cur === v ? 'active' : ''} ${v <= cur ? 'filled' : ''}`}
-              onClick={() => {
-                const val = v / 100;
+        {(() => {
+          const curPct = Math.round((termOpacity.get(activeTermId || nodeId) ?? 1.0) * 100);
+          return (
+            <input
+              type="range"
+              className="panel-opacity-slider"
+              min={0}
+              max={100}
+              step={5}
+              value={curPct}
+              onClick={e => e.stopPropagation()}
+              onMouseDown={e => e.stopPropagation()}
+              onChange={e => {
+                const val = Number(e.target.value) / 100;
                 termOpacity.set(activeTermId || nodeId, val);
                 if (activeTermId) applyTermOpacity(activeTermId, containerRef.current);
                 else if (containerRef.current) containerRef.current.style.background = `rgba(0,0,0,${val})`;
                 forceUpdate(n => n + 1);
               }}
-              title={`${v}%`}
-            />;
-          })}
-        </div>
+              title={`투명도 ${curPct}%`}
+            />
+          );
+        })()}
         <button className="panel-btn" onClick={() => onSplit(nodeId, 'row')} title="Split Horizontal">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
             <rect x="1" y="1" width="12" height="12" rx="1.5" /><line x1="7" y1="1" x2="7" y2="13" />
@@ -1414,6 +1547,23 @@ export const TerminalPanel: React.FC<Props> = ({
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
             <rect x="1" y="1" width="12" height="12" rx="1.5" /><line x1="1" y1="7" x2="13" y2="7" />
           </svg>
+        </button>
+        <button
+          className={`panel-btn ${isFloating ? 'panel-btn-active' : ''}`}
+          onClick={() => onToggleFloat?.(nodeId)}
+          title={isFloating ? '원래 크기로' : '플로팅 확대 (모든 터미널 위에)'}
+        >
+          {isFloating ? (
+            // 원상복구 아이콘 — 작은 사각형이 큰 사각형에서 나오는 모양
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <rect x="1" y="4" width="9" height="9" rx="1" /><path d="M4 4V1h9v9h-3" />
+            </svg>
+          ) : (
+            // 확대 아이콘 — 가운데 네모 + 화살표 외곽
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M1 5V1h4 M13 5V1H9 M1 9v4h4 M13 9v4H9" />
+            </svg>
+          )}
         </button>
         <button
           className="panel-btn panel-btn-close"
@@ -1429,7 +1579,51 @@ export const TerminalPanel: React.FC<Props> = ({
           title="Close"
         >&times;</button>
       </div>
-      <div ref={containerRef} className="panel-terminal-area" />
+      <div className="panel-terminal-split">
+        {(() => {
+          const treeVisible = !!activeTermId && isTreeVisibleForTerm(activeTermId);
+          const canShowTree = treeVisible && !!activeSession?.sessionId && !!activeTermId && isTermConnected(activeTermId);
+          return (
+            <>
+              {canShowTree && (
+                <div className="panel-file-tree" style={{ width: treeWidth }}>
+                  <RemoteFileTree
+                    termId={activeTermId!}
+                    sessionName={activeSession!.sessionName}
+                    sessionId={activeSession!.sessionId}
+                    initialPath={termCurrentPwd.get(activeTermId!)}
+                    onOpenFile={(tid, rp, fn) => onOpenRemoteFile?.(tid, rp, fn)}
+                    onAttachToClaude={(tid, rp, fn, isDir) => onAttachToClaude?.(tid, rp, fn, isDir)}
+                  />
+                  <div
+                    className="panel-file-tree-resizer"
+                    title="드래그하여 너비 조절 (더블클릭: 기본값 240)"
+                    onMouseDown={e => {
+                      e.preventDefault();
+                      const startX = e.clientX;
+                      const startW = treeWidth;
+                      const onMove = (ev: MouseEvent) => {
+                        const dx = ev.clientX - startX;
+                        const w = Math.max(160, Math.min(800, startW + dx));
+                        onTreeWidthChange?.(w);
+                      };
+                      const onUp = () => {
+                        window.removeEventListener('mousemove', onMove);
+                        window.removeEventListener('mouseup', onUp);
+                        window.dispatchEvent(new Event('resize'));
+                      };
+                      window.addEventListener('mousemove', onMove);
+                      window.addEventListener('mouseup', onUp);
+                    }}
+                    onDoubleClick={() => onTreeWidthChange?.(240)}
+                  />
+                </div>
+              )}
+              <div ref={containerRef} className="panel-terminal-area" />
+            </>
+          );
+        })()}
+      </div>
       {miniCtx && (
         <ContextMenu
           x={miniCtx.x} y={miniCtx.y}
@@ -1470,7 +1664,7 @@ export const TerminalPanel: React.FC<Props> = ({
       {multiPaste && ReactDOM.createPortal(
         <div className="session-editor-backdrop"
           onMouseDown={e => { (e.currentTarget as any).__clickedBackdrop = (e.target === e.currentTarget); }}
-          onMouseUp={e => { if ((e.currentTarget as any).__clickedBackdrop && e.target === e.currentTarget) setMultiPaste(null); }}
+          onMouseUp={e => { if ((e.currentTarget as any).__clickedBackdrop && e.target === e.currentTarget) { const tid = multiPaste.termId; setMultiPaste(null); setTimeout(() => focusTerm(tid), 0); } }}
         >
           <div className="session-editor" onClick={e => e.stopPropagation()} style={{ width: 480 }}>
             <h3>여러 줄 붙여넣기</h3>
@@ -1482,20 +1676,26 @@ export const TerminalPanel: React.FC<Props> = ({
               style={{ width: '100%', height: 150, background: '#111', color: '#eee', border: '1px solid #333', borderRadius: 4, padding: 8, fontSize: 12, fontFamily: 'monospace', resize: 'vertical', boxSizing: 'border-box' }}
             />
             <div className="session-editor-actions">
-              <button className="btn-cancel" onClick={() => setMultiPaste(null)}>취소</button>
+              <button className="btn-cancel" onClick={() => {
+                const tid = multiPaste.termId;
+                setMultiPaste(null);
+                setTimeout(() => focusTerm(tid), 0);
+              }}>취소</button>
               <button className="btn-save" onClick={() => {
+                const tid = multiPaste.termId;
                 try {
-                  const entry = termStore.get(multiPaste.termId);
+                  const entry = termStore.get(tid);
                   if (entry) {
                     // xterm.paste() — bracketed paste mode 활성 시 자동으로 \e[200~...\e[201~ 래핑
                     entry.term.paste(multiPaste.text);
-                  } else if (ptyConnected.has(multiPaste.termId)) {
-                    (window as any).api.ptyInput(multiPaste.termId, multiPaste.text);
+                  } else if (ptyConnected.has(tid)) {
+                    (window as any).api.ptyInput(tid, multiPaste.text);
                   } else {
-                    (window as any).api.sendSSHInput(multiPaste.termId, multiPaste.text);
+                    (window as any).api.sendSSHInput(tid, multiPaste.text);
                   }
                 } catch {}
                 setMultiPaste(null);
+                setTimeout(() => focusTerm(tid), 0);
               }}>붙여넣기</button>
             </div>
           </div>
@@ -1518,16 +1718,18 @@ export const TerminalPanel: React.FC<Props> = ({
               navigator.clipboard.writeText(sel).catch(() => {});
             }},
             { label: '붙여넣기', onClick: () => {
+              const tid = activeTermId;
               navigator.clipboard.readText().then(text => {
                 if (!text) return;
                 const settings = getTerminalSettings();
                 if (text.includes('\n') && settings.multiLinePaste === 'dialog') {
-                  showMultiLinePasteDialog(activeTermId, text);
+                  showMultiLinePasteDialog(tid, text);
                 } else {
                   try {
-                    const entry = termStore.get(activeTermId);
+                    const entry = termStore.get(tid);
                     if (entry) entry.term.paste(text);
                   } catch {}
+                  setTimeout(() => focusTerm(tid), 0);
                 }
               }).catch(() => {});
             }},

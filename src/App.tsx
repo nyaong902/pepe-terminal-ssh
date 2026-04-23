@@ -1,5 +1,5 @@
 // src/App.tsx
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import './App.css';
 import { TabBar } from './components/TabBar';
 import { MenuBar } from './components/MenuBar';
@@ -8,11 +8,14 @@ import { Layout } from './components/Layout';
 import { SearchBar } from './components/SearchBar';
 import { FileExplorer } from './components/FileExplorer';
 import { FileEditor } from './components/FileEditor';
-import { RemoteFileTree } from './components/RemoteFileTree';
 import { ClaudeChat } from './components/ClaudeChat';
 import { QuickConnectBar, QuickConnectResult } from './components/QuickConnectDialog';
 import { StatusBar } from './components/StatusBar';
-import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect } from './components/TerminalPanel';
+import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect, toggleTreeVisibleForTerm, startInitialConnectWatchdog, getCurrentPwdForTerm } from './components/TerminalPanel';
+import { marked } from 'marked';
+// @ts-ignore — vite ?raw 로 docs/MANUAL.md 를 번들 문자열로 임베드
+import manualMd from '../docs/MANUAL.md?raw';
+import { getClaudeFontFamily, getClaudeFontSize, setClaudeFontFamily, setClaudeFontSize, applyClaudeFontVars } from './utils/claudeFont';
 import { getTerminalSettings, saveTerminalSettings, TerminalSettings } from './utils/terminalSettings';
 import { loadKeybindings, matchKeybinding, getKeybindings, DEFAULT_KEYBINDINGS, KEYBINDING_LABELS, keyEventToCombo, setKeybindingListening } from './utils/keybindings';
 import { getThemeList } from './utils/terminalThemes';
@@ -22,6 +25,7 @@ import {
   PanelSession,
   splitNode,
   splitNodeWithSessions,
+  addSessionsAsTile,
   removeLeafNode,
   addSessionToPanel,
   appendSessionsToPanel,
@@ -225,10 +229,131 @@ function App() {
   }, [showBroadcast]);
   const [broadcastText, setBroadcastText] = useState('');
   const [broadcastAppendNewline, setBroadcastAppendNewline] = useState(true);
-  const [broadcastScope, setBroadcastScope] = useState<'current' | 'visible' | 'connected'>('current');
+  const [broadcastScope, setBroadcastScope] = useState<'current' | 'visible' | 'connected'>('visible');
   const [broadcastShowHistory, setBroadcastShowHistory] = useState(false);
+  // 일괄 파일 전송 모달
+  const [showBcastFileXfer, setShowBcastFileXfer] = useState(false);
+  const [bcastXferPath, setBcastXferPath] = useState(''); // 비우면 세션별 현재 경로 사용
+  // source 가 있으면 그 termId(원격 서버) 에서 읽어오는 파일, 없으면 로컬 path
+  const [bcastXferFiles, setBcastXferFiles] = useState<{ path: string; isFolder: boolean; sourceTermId?: string; sourceLabel?: string }[]>([]);
+  const [bcastXferInProgress, setBcastXferInProgress] = useState(false);
+  const [bcastXferLog, setBcastXferLog] = useState<string[]>([]);
+  // 원격 소스 picker (일괄 파일 전송 서브 모달)
+  const [remotePickerOpen, setRemotePickerOpen] = useState(false);
+  // 선택된 세션의 ID (sessionsStore 기준). 실제 SFTP 연결의 termId/connId 는 remotePickerConnId.
+  const [remotePickerSessionId, setRemotePickerSessionId] = useState<string>('');
+  const [remotePickerConnId, setRemotePickerConnId] = useState<string>('');
+  const [remotePickerPath, setRemotePickerPath] = useState<string>('');
+  const [remotePickerFiles, setRemotePickerFiles] = useState<{ name: string; isDir: boolean }[]>([]);
+  const [remotePickerSelected, setRemotePickerSelected] = useState<Set<string>>(new Set());
+  const [remotePickerLoading, setRemotePickerLoading] = useState(false);
+  const [remotePickerConnecting, setRemotePickerConnecting] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+  const manualHtml = useMemo(() => {
+    try { return marked.parse(manualMd) as string; } catch { return '<pre>매뉴얼 로드 실패</pre>'; }
+  }, []);
+  const [remotePickerSessions, setRemotePickerSessions] = useState<any[]>([]); // 전체 세션 리스트
+  const [remotePickerFolders, setRemotePickerFolders] = useState<any[]>([]); // 폴더 맵
+  // picker 가 새로 만든 임시 SFTP 연결 connId 들 — 모달 닫힐 때 일괄 해제
+  const [remotePickerTempConns, setRemotePickerTempConns] = useState<string[]>([]);
+
+  // picker 가 열릴 때 전체 세션/폴더 로드
+  useEffect(() => {
+    if (!remotePickerOpen) return;
+    (async () => {
+      try {
+        const data: any = await (window as any).api?.listSessions?.();
+        setRemotePickerSessions(data?.sessions || []);
+        setRemotePickerFolders(data?.folders || []);
+      } catch {}
+    })();
+  }, [remotePickerOpen]);
+
+  // 세션 선택 변경 시 자동으로 연결 보장 + 파일 리스트 로드
+  useEffect(() => {
+    if (!remotePickerOpen || !remotePickerSessionId) return;
+    let cancelled = false;
+    (async () => {
+      // 1) 이미 터미널로 열린 세션이면 그 termId 재사용
+      if (activeTab) {
+        const open = collectAllSessions(activeTab.layout).find(s => s.sessionId === remotePickerSessionId && isTermConnected(s.termId));
+        if (open) {
+          if (!cancelled) {
+            setRemotePickerConnId(open.termId);
+            const pwd = getCurrentPwdForTerm(open.termId) || '/';
+            setRemotePickerPath(pwd);
+          }
+          return;
+        }
+      }
+      // 2) 아니면 백그라운드 SFTP 연결 시도
+      const sess = remotePickerSessions.find(s => s.id === remotePickerSessionId);
+      if (!sess) return;
+      setRemotePickerConnecting(true);
+      try {
+        const connId = `bcast-pick-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const jumpOpts = sess.jumpTargetHost?.trim()
+          ? { host: sess.jumpTargetHost.trim(), user: sess.jumpTargetUser || 'root', port: Number(sess.jumpTargetPort) || 22, password: sess.jumpTargetPassword || undefined }
+          : undefined;
+        const r: any = await (window as any).api?.feSftpConnect?.(connId, sess.host, sess.port || 22, sess.username, sess.auth, jumpOpts);
+        if (cancelled) return;
+        if (!r?.success) {
+          alert(`연결 실패 (${sess.name}): ${r?.error || '알 수 없는 오류'}`);
+          setRemotePickerConnecting(false);
+          return;
+        }
+        setRemotePickerTempConns(prev => [...prev, connId]);
+        setRemotePickerConnId(connId);
+        try {
+          const home: any = await (window as any).api?.feHomeDir?.('remote', connId);
+          const homePath = typeof home === 'string' ? home : (home?.path || '/');
+          if (!cancelled) setRemotePickerPath(homePath || '/');
+        } catch { if (!cancelled) setRemotePickerPath('/'); }
+      } catch (err: any) {
+        if (!cancelled) alert(`연결 실패: ${err?.message || err}`);
+      }
+      if (!cancelled) setRemotePickerConnecting(false);
+    })();
+    return () => { cancelled = true; };
+  }, [remotePickerOpen, remotePickerSessionId, remotePickerSessions]);
+
+  // 경로/connId 기반 파일 리스트 로드
+  useEffect(() => {
+    if (!remotePickerOpen || !remotePickerConnId || !remotePickerPath) return;
+    let cancelled = false;
+    (async () => {
+      setRemotePickerLoading(true);
+      try {
+        const r: any = await (window as any).api?.feListDir?.('remote', remotePickerPath, remotePickerConnId);
+        if (!cancelled) setRemotePickerFiles(r?.files || []);
+      } catch {
+        if (!cancelled) setRemotePickerFiles([]);
+      }
+      if (!cancelled) setRemotePickerLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [remotePickerOpen, remotePickerConnId, remotePickerPath]);
+
+  // 모달 닫힐 때 임시 연결 정리
+  useEffect(() => {
+    if (remotePickerOpen) return;
+    if (remotePickerTempConns.length === 0) return;
+    for (const cid of remotePickerTempConns) {
+      try { (window as any).api?.feSftpDisconnect?.(cid); } catch {}
+    }
+    setRemotePickerTempConns([]);
+  }, [remotePickerOpen]);
   const [broadcastHistoryIdx, setBroadcastHistoryIdx] = useState(-1);
-  const [splitSessionPicker, setSplitSessionPicker] = useState<{ dir: 'row' | 'column'; sessions: { sessionId: string; sessionName: string; host: string; termId: string }[]; srcTermId?: string } | null>(null);
+  // 히스토리 드롭다운에서 방향키로 이동한 항목이 보이게 스크롤 따라오기
+  useEffect(() => {
+    if (!broadcastShowHistory || broadcastHistoryIdx < 0) return;
+    const active = document.querySelector('.broadcast-history-dropdown .broadcast-history-item.active');
+    if (active instanceof HTMLElement) {
+      active.scrollIntoView({ block: 'nearest' });
+    }
+  }, [broadcastHistoryIdx, broadcastShowHistory]);
+  const [splitSessionPicker, setSplitSessionPicker] = useState<{ dir: 'row' | 'column'; sessions: { sessionId: string; sessionName: string; host: string; termId: string }[]; srcTermId?: string; targetNodeId: string } | null>(null);
+  const [floatingPanelId, setFloatingPanelId] = useState<string | null>(null);
   const [remoteTreeWidth, setRemoteTreeWidth] = useState<number>(240);
   const remoteTreeWidthLoadedRef = useRef(false);
   const [showClaudeChat, setShowClaudeChat] = useState(true);
@@ -270,6 +395,27 @@ function App() {
   useEffect(() => {
     (window as any).api?.windowIsMaximized?.().then((m: boolean) => setIsMaximized(!!m)).catch(() => {});
     const off = (window as any).api?.onWindowMaximized?.((m: boolean) => setIsMaximized(!!m));
+    return () => { try { off?.(); } catch {} };
+  }, []);
+  // Claude 채팅 전용 폰트/크기 — 터미널과 독립 설정 (src/utils/claudeFont)
+  const [claudeFontFamily, setClaudeFontFamilyState] = useState(() => getClaudeFontFamily());
+  const [claudeFontSize, setClaudeFontSizeState] = useState(() => getClaudeFontSize());
+  useEffect(() => { applyClaudeFontVars(); }, []);
+  // ClaudeChat 의 Ctrl+Wheel 이 외부에서 변경 시 옵션 창 값 동기화용
+  useEffect(() => {
+    const onChange = () => {
+      setClaudeFontFamilyState(getClaudeFontFamily());
+      setClaudeFontSizeState(getClaudeFontSize());
+    };
+    window.addEventListener('claude-font-changed', onChange);
+    return () => window.removeEventListener('claude-font-changed', onChange);
+  }, []);
+  // main 프로세스 디버그 로그를 DevTools Console 로 포워딩
+  useEffect(() => {
+    const off = (window as any).api?.onDebugLog?.((msg: string) => {
+      // eslint-disable-next-line no-console
+      console.log('%c[main]', 'color:#8ab4f8', msg);
+    });
     return () => { try { off?.(); } catch {} };
   }, []);
   const [fullscreenTermId, setFullscreenTermId] = useState<string | null>(null);
@@ -336,7 +482,7 @@ function App() {
     if (broadcastNoticeTimer.current) clearTimeout(broadcastNoticeTimer.current);
     broadcastNoticeTimer.current = setTimeout(() => setBroadcastNotice(null), 2500);
   };
-  const sendBroadcast = (scope: 'current' | 'visible' | 'connected', override?: { raw: string; label?: string }) => {
+  const sendBroadcast = (scope: 'current' | 'visible' | 'connected', override?: { raw: string; label?: string }, opts?: { keepFocusOnInput?: boolean }) => {
     let text: string;
     let label: string;
     if (override) {
@@ -365,6 +511,16 @@ function App() {
     flashBroadcastNotice(`${label} → ${targets.length}개 세션 전송`, 'ok');
     // 전송 후 입력창 비우기 (override는 제어 문자라 제외)
     if (!override) setBroadcastText('');
+    // 포커스 복귀: 기본은 활성 터미널로, 일괄작업창에서 전송한 경우엔 입력창 유지
+    setTimeout(() => {
+      if (opts?.keepFocusOnInput) {
+        const inp = document.querySelector('.broadcast-input') as HTMLInputElement | null;
+        inp?.focus();
+      } else {
+        const atid = getActiveTermId();
+        if (atid) focusTerm(atid);
+      }
+    }, 0);
   };
 
   const handleThemeChange = (name: string) => {
@@ -425,23 +581,7 @@ function App() {
       if ((matchKeybinding(e, 'splitSessionH') || matchKeybinding(e, 'splitSessionV')) && activeTab && selectedPanelId) {
         e.preventDefault();
         const dir: 'row' | 'column' = matchKeybinding(e, 'splitSessionV') ? 'row' : 'column';
-        const curTid = getActiveTermId();
-        const connectedSessions: { sessionId: string; sessionName: string; host: string; termId: string }[] = [];
-        const collectLeaves = (node: LayoutNode) => {
-          if (node.type === 'leaf') {
-            for (const s of node.panel.sessions) {
-              if (isTermConnected(s.termId)) {
-                const info = getTermSessionInfo(s.termId);
-                if (info && info.sessionId && !connectedSessions.some(c => c.sessionId === info.sessionId)) {
-                  connectedSessions.push({ sessionId: info.sessionId, sessionName: info.sessionName, host: info.host, termId: s.termId });
-                }
-              }
-            }
-          } else { for (const c of node.children) collectLeaves(c); }
-        };
-        collectLeaves(activeTab.layout);
-        if (connectedSessions.length === 0) { splitPanel(activeTab.id, selectedPanelId, dir); return; }
-        setSplitSessionPicker({ dir, sessions: connectedSessions, srcTermId: curTid || undefined });
+        openSplitSessionPicker(dir, selectedPanelId);
         return;
       }
       // Alt+1..9: 워크스페이스 내 모든 미니탭(모든 패널) 기준 N번째 탭으로 이동 (Alt+9는 마지막 탭)
@@ -548,6 +688,18 @@ function App() {
         return;
       }
       if (matchKeybinding(e, 'find')) { e.preventDefault(); setShowSearch(prev => !prev); return; }
+      if (matchKeybinding(e, 'toggleFileTree')) {
+        e.preventDefault();
+        const tid = getActiveTermId();
+        if (tid) {
+          toggleTreeVisibleForTerm(tid);
+          [50, 200].forEach(ms => setTimeout(() => {
+            window.dispatchEvent(new Event('resize'));
+            refitAllTerms();
+          }, ms));
+        }
+        return;
+      }
       const termId = getActiveTermId();
       if (!termId) return;
       if (matchKeybinding(e, 'clearScrollback')) { e.preventDefault(); clearScrollbackInTerm(termId); }
@@ -667,17 +819,48 @@ function App() {
     setTabs(prev => prev.map(t => t.id === tabId ? { ...t, layout: fn(t.layout) } : t));
   };
 
+  // 현재 활성 세션의 folderId 기준으로 같은 폴더 세션들을 picker 로 띄운다.
+  // 픽커에서 선택된 세션을 새 termId 로 연결해서 targetNodeId 패널을 분할해 배치.
+  // 활성 세션이 없거나 folder 내 다른 세션이 없으면 그냥 빈 분할.
+  const openSplitSessionPicker = async (dir: 'row' | 'column', targetNodeId: string) => {
+    if (!activeTab) return;
+    const curTid = getActiveTermId();
+    const curInfo = curTid ? getTermSessionInfo(curTid) : null;
+    let folderSessions: { sessionId: string; sessionName: string; host: string; termId: string }[] = [];
+    try {
+      const data: any = await (window as any).api?.listSessions?.();
+      const all: any[] = data?.sessions ?? data ?? [];
+      if (curInfo?.sessionId) {
+        const cur = all.find(s => s.id === curInfo.sessionId);
+        const folderId = cur?.folderId;
+        folderSessions = all
+          .filter(s => (s.folderId ?? undefined) === (folderId ?? undefined))
+          .map(s => ({ sessionId: s.id, sessionName: s.name, host: s.host || '', termId: '' }));
+      } else {
+        // 활성 세션 모르면 루트(폴더 없음) 세션들
+        folderSessions = all
+          .filter(s => !s.folderId)
+          .map(s => ({ sessionId: s.id, sessionName: s.name, host: s.host || '', termId: '' }));
+      }
+    } catch {}
+    if (folderSessions.length === 0) {
+      splitPanel(activeTab.id, targetNodeId, dir);
+      return;
+    }
+    setSplitSessionPicker({ dir, sessions: folderSessions, srcTermId: curTid || undefined, targetNodeId });
+  };
+
   const splitPanel = (tabId: TabId, targetNodeId: string, direction: 'row' | 'column') => {
     updateLayout(tabId, layout => splitNode(layout, targetNodeId, direction));
     setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
   };
 
   const handleSplitSessionSelect = (target: { sessionId: string; sessionName: string; host: string; termId: string }) => {
-    if (!activeTab || !selectedPanelId || !splitSessionPicker) return;
-    const { dir } = splitSessionPicker;
+    if (!activeTab || !splitSessionPicker) return;
+    const { dir, targetNodeId } = splitSessionPicker;
     const newTermId = `term-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const newSess: PanelSession = { termId: newTermId, sessionId: target.sessionId, sessionName: target.sessionName };
-    updateLayout(activeTab.id, layout => splitNodeWithSessions(layout, selectedPanelId, dir, [newSess], false));
+    updateLayout(activeTab.id, layout => splitNodeWithSessions(layout, targetNodeId, dir, [newSess], false));
     setTimeout(async () => {
       // 선택된 세션의 원본 termId에서 스타일 복제
       cloneTermStyle(target.termId, newTermId);
@@ -902,7 +1085,7 @@ function App() {
 
   const handleConnectSession = (sessionId: string, sessionName: string, _targetPanelId?: string | null, sessionTheme?: string, sessionFontFamily?: string, sessionFontSize?: number, sessionScrollback?: number) => {
     if (!activeTab) return;
-    // 파일 전송 탭이면 SFTP 직접 연결하여 파일 탐색기에 추가
+    // 파일 전송 탭이면 SFTP 직접 연결하여 파일 탐색기에 추가 (점프 호스트 설정도 반영)
     if (activeTab.type === 'fileExplorer') {
       (async () => {
         try {
@@ -910,12 +1093,23 @@ function App() {
           const allSessions = data?.sessions ?? data ?? [];
           const sess = allSessions.find((s: any) => s.id === sessionId);
           if (!sess) return;
+          console.log('[fe-transfer dblclick] session:', { name: sess.name, host: sess.host, jumpTargetHost: sess.jumpTargetHost });
           const connId = `sftp-fe-${Date.now()}`;
-          const result = await (window as any).api.feSftpConnect?.(connId, sess.host, sess.port || 22, sess.username, sess.auth);
+          const jumpOpts = sess.jumpTargetHost?.trim()
+            ? { host: sess.jumpTargetHost.trim(), user: sess.jumpTargetUser || 'root', port: Number(sess.jumpTargetPort) || 22, password: sess.jumpTargetPassword || undefined }
+            : undefined;
+          const displayHost = jumpOpts ? jumpOpts.host : sess.host;
+          const result = await (window as any).api.feSftpConnect?.(connId, sess.host, sess.port || 22, sess.username, sess.auth, jumpOpts);
           if (result?.success) {
-            window.dispatchEvent(new CustomEvent('fe-sftp-connected', { detail: { connId, sessionName, host: sess.host } }));
+            window.dispatchEvent(new CustomEvent('fe-sftp-connected', { detail: { connId, sessionName, host: displayHost } }));
+          } else {
+            const msg = result?.error || '알 수 없는 오류';
+            console.error('[fe-sftp-connect dblclick] failed:', msg);
+            alert(`파일 전송 연결 실패 (${sessionName})\n\n${msg}`);
           }
-        } catch {}
+        } catch (err: any) {
+          console.error('[fe-sftp-connect dblclick] exception:', err);
+        }
       })();
       return;
     }
@@ -1147,8 +1341,8 @@ function App() {
     {
       label: '창',
       items: [
-        { label: '세로 분할', action: () => { if (activeTab && selectedPanelId) splitPanel(activeTab.id, selectedPanelId, 'row'); }, disabled: !selectedPanelId },
-        { label: '가로 분할', action: () => { if (activeTab && selectedPanelId) splitPanel(activeTab.id, selectedPanelId, 'column'); }, disabled: !selectedPanelId },
+        { label: '세로 분할', action: () => { if (activeTab && selectedPanelId) openSplitSessionPicker('row', selectedPanelId); }, disabled: !selectedPanelId },
+        { label: '가로 분할', action: () => { if (activeTab && selectedPanelId) openSplitSessionPicker('column', selectedPanelId); }, disabled: !selectedPanelId },
         { separator: true, label: '' },
         { label: '화면 지우기', shortcut: 'Ctrl+Shift+L', action: () => { const tid = getActiveTermId(); if (tid) clearScreenInTerm(tid); } },
         { label: '스크롤 버퍼 지우기', shortcut: 'Ctrl+Shift+B', action: () => { const tid = getActiveTermId(); if (tid) clearScrollbackInTerm(tid); } },
@@ -1201,6 +1395,8 @@ function App() {
     {
       label: '도움말',
       items: [
+        { label: '📖 매뉴얼...', action: () => setShowManual(true) },
+        { separator: true, label: '' },
         { label: '단축키 목록', action: () => {
           const kb = getKeybindings();
           const lines = Object.keys(KEYBINDING_LABELS).map(id => `${kb[id] || '(없음)'} — ${KEYBINDING_LABELS[id]}`);
@@ -1347,13 +1543,49 @@ function App() {
                   if (s.fontFamily || s.fontSize) applyFontToTerm(tid, s.fontFamily, s.fontSize);
                 }, 200);
                 registerTermSession(tid, s.id, s.name, s.host ?? '');
-                ((sessionId, termId) => {
-                  window.api?.connectSSH?.(termId, sessionId)?.then((r: string) => {
-                    if (r === 'need-password') promptPasswordAndConnect(termId, sessionId);
+                // sshd MaxStartups(기본 10:30:60) 초과 drop 방지 — 500ms 엇갈림으로 connect
+                setTimeout(() => {
+                  startInitialConnectWatchdog(tid, s.id);
+                  window.api?.connectSSH?.(tid, s.id)?.then((r: string) => {
+                    if (r === 'need-password') promptPasswordAndConnect(tid, s.id);
                   }).catch(() => {});
-                })(s.id, tid);
+                }, i * 500);
               }
-              setTimeout(() => refitAllTerms(), 200);
+              // refit + 첫 세션으로 포커스 고정 (동시 연결 시 마지막 연결 세션이 포커스 훔치는 현상 방지)
+              setTimeout(() => { refitAllTerms(); if (newTermIds[0]) focusTerm(newTermIds[0]); }, 200);
+            }, 50);
+          } else if (mode === 'split-tile') {
+            // 타일 분할: N 개 세션을 ceil(sqrt(N)) 열 × ceil(N/cols) 행 그리드로 배치
+            const newTermIds = sessList.map(() => `term-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+            const panelSessions: PanelSession[] = sessList.map((s, i) => ({
+              termId: newTermIds[i],
+              sessionId: s.id,
+              sessionName: s.name,
+            }));
+            updateLayout(activeTab.id, layout =>
+              addSessionsAsTile(layout, panelId, panelSessions[0], panelSessions.slice(1))
+            );
+            setTimeout(() => {
+              for (let i = 0; i < sessList.length; i++) {
+                const s = sessList[i] as any;
+                const tid = newTermIds[i];
+                if (s.scrollback) applyScrollbackToTerm(tid, s.scrollback);
+                setTimeout(() => {
+                  if (s.theme) applyThemeToTerm(tid, s.theme);
+                  if (s.fontFamily || s.fontSize) applyFontToTerm(tid, s.fontFamily, s.fontSize);
+                }, 200);
+                registerTermSession(tid, s.id, s.name, s.host ?? '');
+                // sshd MaxStartups(기본 10:30:60) 초과 drop 방지 — 500ms 엇갈림으로 connect
+                setTimeout(() => {
+                  startInitialConnectWatchdog(tid, s.id);
+                  window.api?.connectSSH?.(tid, s.id)?.then((r: string) => {
+                    if (r === 'need-password') promptPasswordAndConnect(tid, s.id);
+                  }).catch(() => {});
+                }, i * 500);
+              }
+              // refit + 첫 세션 포커스 — stagger 전체가 끝난 뒤 포커스 확정 (뒤늦게 마운트되는 터미널이 훔쳐가는 것 방지)
+              const focusDelay = 200 + sessList.length * 500 + 300;
+              setTimeout(() => { refitAllTerms(); if (newTermIds[0]) focusTerm(newTermIds[0]); }, focusDelay);
             }, 50);
           } else {
             const dir: 'row' | 'column' = mode === 'split-v' ? 'row' : 'column';
@@ -1391,13 +1623,17 @@ function App() {
                   if (s.fontFamily || s.fontSize) applyFontToTerm(tid, s.fontFamily, s.fontSize);
                 }, 200);
                 registerTermSession(tid, s.id, s.name, s.host ?? '');
-                ((sessionId, termId) => {
-                  window.api?.connectSSH?.(termId, sessionId)?.then((r: string) => {
-                    if (r === 'need-password') promptPasswordAndConnect(termId, sessionId);
+                // sshd MaxStartups(기본 10:30:60) 초과 drop 방지 — 500ms 엇갈림으로 connect
+                setTimeout(() => {
+                  startInitialConnectWatchdog(tid, s.id);
+                  window.api?.connectSSH?.(tid, s.id)?.then((r: string) => {
+                    if (r === 'need-password') promptPasswordAndConnect(tid, s.id);
                   }).catch(() => {});
-                })(s.id, tid);
+                }, i * 500);
               }
-              setTimeout(() => refitAllTerms(), 200);
+              // refit + 첫 세션 포커스 — stagger 전체가 끝난 뒤 포커스 확정 (뒤늦게 마운트되는 터미널이 훔쳐가는 것 방지)
+              const focusDelay = 200 + sessList.length * 500 + 300;
+              setTimeout(() => { refitAllTerms(); if (newTermIds[0]) focusTerm(newTermIds[0]); }, focusDelay);
             }, 50);
           }
         }}
@@ -1412,72 +1648,33 @@ function App() {
             setTabs(prev => [...prev, feTab!]);
           }
           setActiveTabId(feTab.id);
-          // SFTP 연결
+          // SFTP 연결 — 점프 타겟 설정돼 있으면 ProxyJump 로 내부 서버까지 직결
           try {
             const data = await (window as any).api.listSessions();
             const allSessions = data?.sessions ?? data ?? [];
             const sess = allSessions.find((s: any) => s.id === sessionId);
             if (!sess) return;
+            console.log('[fe-transfer] selected session:', { name: sess.name, host: sess.host, jumpTargetHost: sess.jumpTargetHost, jumpTargetUser: sess.jumpTargetUser });
             const connId = `sftp-fe-${Date.now()}`;
-            const result = await (window as any).api.feSftpConnect?.(connId, sess.host, sess.port || 22, sess.username, sess.auth);
+            const jumpOpts = sess.jumpTargetHost?.trim()
+              ? { host: sess.jumpTargetHost.trim(), user: sess.jumpTargetUser || 'root', port: Number(sess.jumpTargetPort) || 22, password: sess.jumpTargetPassword || undefined }
+              : undefined;
+            const displayHost = jumpOpts ? jumpOpts.host : sess.host;
+            const result = await (window as any).api.feSftpConnect?.(connId, sess.host, sess.port || 22, sess.username, sess.auth, jumpOpts);
             if (result?.success) {
-              window.dispatchEvent(new CustomEvent('fe-sftp-connected', { detail: { connId, sessionName, host: sess.host } }));
+              window.dispatchEvent(new CustomEvent('fe-sftp-connected', { detail: { connId, sessionName, host: displayHost } }));
+            } else {
+              const msg = result?.error || '알 수 없는 오류';
+              console.error('[fe-sftp-connect] failed:', msg);
+              alert(`파일 전송 연결 실패 (${sessionName})\n\n${msg}\n\nDevTools Console 에 [sftp-connect] 로그 확인 권장.`);
             }
-          } catch {}
+          } catch (err: any) {
+            console.error('[fe-sftp-connect] exception:', err);
+            alert(`파일 전송 연결 예외: ${err?.message || err}`);
+          }
         }}
       />
-      {/* 선택된 패널이 SSH 연결된 세션이면 원격 파일 트리 표시 */}
-      {(() => {
-        if (!selectedPanelId || !activeTab) return null;
-        const findLeaf = (node: any, id: string): any => {
-          if (node.type === 'leaf') return node.id === id ? node : null;
-          for (const c of node.children) { const r = findLeaf(c, id); if (r) return r; }
-          return null;
-        };
-        const leaf = findLeaf(activeTab.layout, selectedPanelId);
-        const sess = leaf?.panel?.sessions[leaf.panel.activeIdx];
-        if (!sess || !sess.sessionId || !isTermConnected(sess.termId)) return null;
-        return (
-          <div className="remote-file-tree-container" style={{ width: `${remoteTreeWidth}px` }}>
-            <RemoteFileTree
-              termId={sess.termId}
-              sessionName={sess.sessionName}
-              sessionId={sess.sessionId}
-              onOpenFile={handleOpenRemoteFile}
-              onAttachToClaude={handleAttachToClaude}
-            />
-            <div
-              className="remote-file-tree-resizer"
-              title="드래그하여 너비 조절 (더블클릭: 기본값 240)"
-              onMouseDown={e => {
-                e.preventDefault();
-                const startX = e.clientX;
-                const startWidth = remoteTreeWidth;
-                const onMove = (ev: MouseEvent) => {
-                  const dx = ev.clientX - startX;
-                  const w = Math.max(160, Math.min(800, startWidth + dx));
-                  setRemoteTreeWidth(w);
-                };
-                const onUp = () => {
-                  window.removeEventListener('mousemove', onMove);
-                  window.removeEventListener('mouseup', onUp);
-                  setRemoteTreeWidth(curW => {
-                    if (remoteTreeWidthLoadedRef.current) { try { (window as any).api?.setUIPrefs?.({ remoteTreeWidth: curW }); } catch {} }
-                    return curW;
-                  });
-                  window.dispatchEvent(new Event('resize'));
-                };
-                window.addEventListener('mousemove', onMove);
-                window.addEventListener('mouseup', onUp);
-              }}
-              onDoubleClick={() => {
-                setRemoteTreeWidth(240);
-                try { (window as any).api?.setUIPrefs?.({ remoteTreeWidth: 240 }); } catch {}
-              }}
-            />
-          </div>
-        );
-      })()}
+      {/* 파일 트리는 이제 각 TerminalPanel 내부에서 mini-tab 별로 렌더링됨 (Ctrl+Shift+E 로 토글). */}
       <div className="app-main">
         <div className="tab-bar-row">
           <MenuBar menus={menuDefs} />
@@ -1565,8 +1762,13 @@ function App() {
         {activeTab && activeTab.type !== 'fileExplorer' && activeTab.type !== 'fileEditor' && (
           <Layout root={activeTab.layout}
             selectedPanelId={selectedPanelId}
-            onSplit={(nodeId, dir) => splitPanel(activeTab.id, nodeId, dir)}
+            onSplit={(nodeId, dir) => openSplitSessionPicker(dir, nodeId)}
             onClose={nodeId => closePanel(activeTab.id, nodeId)}
+            floatingPanelId={floatingPanelId}
+            onToggleFloat={nodeId => {
+              setFloatingPanelId(prev => prev === nodeId ? null : nodeId);
+              setTimeout(() => { window.dispatchEvent(new Event('resize')); refitAllTerms(); }, 120);
+            }}
             onSelectPanel={id => setSelectedPanelId(id)}
             onMovePanel={movePanel}
             onSwitchSession={handleSwitchSession}
@@ -1579,6 +1781,13 @@ function App() {
             onConnectDrop={handleConnectDrop}
             onDuplicateSession={handleDuplicateSession}
             availableShells={availableShells}
+            treeWidth={remoteTreeWidth}
+            onTreeWidthChange={w => {
+              setRemoteTreeWidth(w);
+              if (remoteTreeWidthLoadedRef.current) { try { (window as any).api?.setUIPrefs?.({ remoteTreeWidth: w }); } catch {} }
+            }}
+            onOpenRemoteFile={handleOpenRemoteFile}
+            onAttachToClaude={handleAttachToClaude}
           />
         )}
       </div>
@@ -1593,8 +1802,8 @@ function App() {
             onChange={e => setBroadcastScope(e.target.value as any)}
             title="전송 대상"
           >
-            <option value="current">현재 세션 ({collectBroadcastTargets('current').length})</option>
             <option value="visible">보이는 탭 ({collectBroadcastTargets('visible').length})</option>
+            <option value="current">현재 세션 ({collectBroadcastTargets('current').length})</option>
             <option value="connected">연결된 세션 ({collectBroadcastTargets('connected').length})</option>
           </select>
           <div style={{ position: 'relative', flex: 1, display: 'flex' }}>
@@ -1622,16 +1831,16 @@ function App() {
                   setBroadcastHistoryIdx(prev); setBroadcastText(broadcastHistory[prev]);
                   return;
                 }
-                if (e.key === 'Enter') { e.preventDefault(); setBroadcastShowHistory(false); sendBroadcast(broadcastScope); return; }
+                if (e.key === 'Enter') { e.preventDefault(); setBroadcastShowHistory(false); sendBroadcast(broadcastScope, undefined, { keepFocusOnInput: true }); return; }
                 if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
                   if (e.key === 'c' || e.key === 'C') {
                     const inp = e.currentTarget as HTMLInputElement;
                     if (inp.selectionStart !== inp.selectionEnd) return;
                     e.preventDefault();
-                    sendBroadcast(broadcastScope, { raw: '\x03', label: '^C' });
+                    sendBroadcast(broadcastScope, { raw: '\x03', label: '^C' }, { keepFocusOnInput: true });
                   } else if (e.key === 'd' || e.key === 'D') {
                     e.preventDefault();
-                    sendBroadcast(broadcastScope, { raw: '\x04', label: '^D' });
+                    sendBroadcast(broadcastScope, { raw: '\x04', label: '^D' }, { keepFocusOnInput: true });
                   }
                 }
               }}
@@ -1660,6 +1869,9 @@ function App() {
             <span>↵</span>
           </label>
           <button className="broadcast-btn" onClick={() => sendBroadcast(broadcastScope)} title="텍스트 전송 (Enter)">전송</button>
+          <button className="broadcast-btn" onClick={() => { setBcastXferFiles([]); setBcastXferPath(''); setBcastXferLog([]); setShowBcastFileXfer(true); }} title="여러 세션에 파일/폴더 일괄 업로드">📤 파일전송</button>
+          <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x1b[A', label: '↑' })} title="위 방향키 (이전 명령) 전송">↑</button>
+          <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x1b[B', label: '↓' })} title="아래 방향키 (다음 명령) 전송">↓</button>
           <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x03', label: '^C' })} title="Ctrl+C (SIGINT) 전송">^C</button>
           <button className="broadcast-btn ctrl" onClick={() => sendBroadcast(broadcastScope, { raw: '\x04', label: '^D' })} title="Ctrl+D (EOF) 전송">^D</button>
           {broadcastNotice && (
@@ -1740,6 +1952,34 @@ function App() {
                     style={{ width: 100, background: '#1a1a1a', color: '#eee', border: '1px solid #333', borderRadius: 4, padding: '8px', fontSize: 14, fontFamily: 'monospace', boxSizing: 'border-box' }}
                     value={optFontSize}
                     onChange={e => setOptFontSize(Math.max(8, Math.min(40, Number(e.target.value) || 14)))}
+                  />
+                </div>
+                <div style={{ marginBottom: 16, borderTop: '1px solid #333', paddingTop: 12 }}>
+                  <div style={{ color: '#ccc', fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Claude 채팅창 글꼴</div>
+                  <p style={{ color: '#888', fontSize: 12, margin: '0 0 6px' }}>터미널과 독립 설정. 채팅창에서 Ctrl+휠로도 크기 조절.</p>
+                  <select
+                    style={{ width: '100%', background: '#1a1a1a', color: '#eee', border: '1px solid #333', borderRadius: 4, padding: '8px', fontSize: 14, boxSizing: 'border-box', cursor: 'pointer' }}
+                    value={claudeFontFamily}
+                    onChange={e => { setClaudeFontFamily(e.target.value); setClaudeFontFamilyState(e.target.value); }}
+                  >
+                    <option value="">기본 (시스템 UI 폰트)</option>
+                    {availableFonts.map(f => <option key={f} value={f} style={{ fontFamily: `"${f}", sans-serif` }}>{f}</option>)}
+                  </select>
+                </div>
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ color: '#ccc', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Claude 채팅창 글꼴 크기</div>
+                  <input
+                    type="number"
+                    min={9}
+                    max={32}
+                    step={1}
+                    style={{ width: 100, background: '#1a1a1a', color: '#eee', border: '1px solid #333', borderRadius: 4, padding: '8px', fontSize: 14, fontFamily: 'monospace', boxSizing: 'border-box' }}
+                    value={claudeFontSize}
+                    onChange={e => {
+                      const v = Math.max(9, Math.min(32, Number(e.target.value) || 13));
+                      setClaudeFontSize(v);
+                      setClaudeFontSizeState(v);
+                    }}
                   />
                 </div>
                 <div style={{ marginBottom: 16 }}>
@@ -2030,6 +2270,277 @@ function App() {
             </div>
             <div className="folder-picker-actions">
               <button onClick={() => setSplitSessionPicker(null)}>취소</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showManual && (
+        <div className="session-editor-backdrop" onClick={() => setShowManual(false)}>
+          <div className="session-editor manual-modal" onClick={e => e.stopPropagation()}
+            style={{ width: '80vw', maxWidth: 1000, height: '85vh', display: 'flex', flexDirection: 'column' }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 4px 8px', borderBottom: '1px solid #333' }}>
+              <h3 style={{ margin: 0 }}>📖 PePe Terminal(SSH) 매뉴얼</h3>
+              <button onClick={() => setShowManual(false)} title="닫기">✕</button>
+            </div>
+            <div className="manual-content" style={{ flex: 1, overflow: 'auto', padding: '12px 16px' }}
+              dangerouslySetInnerHTML={{ __html: manualHtml }}
+            />
+          </div>
+        </div>
+      )}
+
+      {remotePickerOpen && (
+        <div className="session-editor-backdrop" style={{ zIndex: 10000 }} onClick={() => setRemotePickerOpen(false)}>
+          <div className="session-editor" onClick={e => e.stopPropagation()} style={{ width: 580, maxHeight: '80vh', display: 'flex', flexDirection: 'column', zIndex: 10001 }}>
+            <h3>🌐 원격 파일 선택</h3>
+
+            <label style={{ fontSize: 12, color: '#bbb' }}>소스 세션 (전체 목록, 미연결 세션 선택 시 백그라운드 SFTP 연결)</label>
+            {(() => {
+              // 연결된 termId 맵 구축 (sessionId → 있으면 연결됨)
+              const connectedSet = new Set<string>();
+              if (activeTab) {
+                for (const s of collectAllSessions(activeTab.layout)) {
+                  if (s.sessionId && isTermConnected(s.termId)) connectedSet.add(s.sessionId);
+                }
+              }
+              // 폴더 트리 (간단 평면화) — 각 세션을 "폴더경로/세션명" 으로 정렬
+              const folderPath = (fid?: string): string => {
+                if (!fid) return '';
+                const f = remotePickerFolders.find(x => x.id === fid);
+                if (!f) return '';
+                const parent = folderPath(f.parentId);
+                return parent ? `${parent}/${f.name}` : f.name;
+              };
+              const sorted = [...remotePickerSessions].sort((a, b) => {
+                const fa = folderPath(a.folderId);
+                const fb = folderPath(b.folderId);
+                return fa.localeCompare(fb) || a.name.localeCompare(b.name);
+              });
+              return (
+                <select value={remotePickerSessionId} onChange={e => {
+                  setRemotePickerSessionId(e.target.value);
+                  setRemotePickerFiles([]);
+                  setRemotePickerSelected(new Set());
+                }}>
+                  <option value="">(세션 선택)</option>
+                  {sorted.map(s => {
+                    const fp = folderPath(s.folderId);
+                    const mark = connectedSet.has(s.id) ? '🟢' : '⚪';
+                    return (
+                      <option key={s.id} value={s.id}>
+                        {mark} {s.name}{fp ? ` [${fp}]` : ''} ({s.host})
+                      </option>
+                    );
+                  })}
+                </select>
+              );
+            })()}
+            {remotePickerConnecting && (
+              <div style={{ fontSize: 11, color: '#f0c64c', marginTop: 4 }}>
+                연결 중...
+              </div>
+            )}
+
+            <label style={{ fontSize: 12, color: '#bbb', marginTop: 10 }}>경로</label>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <input type="text" value={remotePickerPath} onChange={e => setRemotePickerPath(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    setRemotePickerSelected(new Set());
+                    // path 변경은 useEffect 가 자동 재로드
+                  }
+                }}
+                style={{ flex: 1 }}
+                disabled={!remotePickerConnId} />
+              <button onClick={() => {
+                const parent = remotePickerPath.replace(/\/[^/]+\/?$/, '') || '/';
+                setRemotePickerPath(parent);
+                setRemotePickerSelected(new Set());
+              }} title="상위 폴더" disabled={!remotePickerConnId}>▲</button>
+              <button onClick={async () => {
+                if (!remotePickerConnId) return;
+                setRemotePickerLoading(true);
+                try { const r: any = await (window as any).api?.feListDir?.('remote', remotePickerPath, remotePickerConnId); setRemotePickerFiles(r?.files || []); } catch { setRemotePickerFiles([]); }
+                setRemotePickerLoading(false);
+              }} title="새로고침" disabled={!remotePickerConnId}>⟳</button>
+            </div>
+
+            <div style={{ flex: 1, minHeight: 200, maxHeight: 320, overflowY: 'auto', border: '1px solid #333', borderRadius: 4, marginTop: 8, background: '#161616' }}>
+              {!remotePickerConnId ? (
+                <div style={{ color: '#666', fontSize: 12, padding: 16, textAlign: 'center' }}>세션을 선택하세요</div>
+              ) : remotePickerLoading || remotePickerConnecting ? (
+                <div style={{ color: '#888', fontSize: 12, padding: 16, textAlign: 'center' }}>로딩 중...</div>
+              ) : remotePickerFiles.length === 0 ? (
+                <div style={{ color: '#666', fontSize: 12, padding: 16, textAlign: 'center' }}>(비어있음 또는 경로 에러)</div>
+              ) : (
+                remotePickerFiles
+                  .filter(f => f.name !== '.' && f.name !== '..')
+                  .sort((a, b) => (a.isDir !== b.isDir) ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name))
+                  .map(f => (
+                    <div key={f.name} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 6px', cursor: 'pointer', background: remotePickerSelected.has(f.name) ? '#2b4e74' : 'transparent' }}
+                      onClick={() => {
+                        setRemotePickerSelected(prev => {
+                          const next = new Set(prev);
+                          if (next.has(f.name)) next.delete(f.name); else next.add(f.name);
+                          return next;
+                        });
+                      }}
+                      onDoubleClick={() => {
+                        if (!f.isDir) return;
+                        const sep = remotePickerPath.endsWith('/') ? '' : '/';
+                        setRemotePickerPath(remotePickerPath + sep + f.name);
+                        setRemotePickerSelected(new Set());
+                      }}
+                    >
+                      <input type="checkbox" readOnly checked={remotePickerSelected.has(f.name)} />
+                      <span style={{ fontSize: 12 }}>{f.isDir ? '📁' : '📄'} {f.name}</span>
+                    </div>
+                  ))
+              )}
+            </div>
+            <div style={{ fontSize: 11, color: '#777', marginTop: 4 }}>
+              🟢 연결된 세션 / ⚪ 미연결 (선택 시 자동 연결). 클릭: 선택 / 더블클릭: 폴더 진입. {remotePickerSelected.size}개 선택됨
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+              <button onClick={() => setRemotePickerOpen(false)}>닫기</button>
+              <button className="primary" disabled={remotePickerSelected.size === 0 || !remotePickerConnId}
+                onClick={() => {
+                  const sess = remotePickerSessions.find(s => s.id === remotePickerSessionId);
+                  const sessLabel = sess?.name || remotePickerConnId.slice(-6);
+                  const toAdd = [...remotePickerSelected].map(name => {
+                    const sep = remotePickerPath.endsWith('/') ? '' : '/';
+                    const fullPath = remotePickerPath + sep + name;
+                    const isFolder = remotePickerFiles.find(f => f.name === name)?.isDir || false;
+                    return { path: fullPath, isFolder, sourceTermId: remotePickerConnId, sourceLabel: sessLabel };
+                  });
+                  setBcastXferFiles(prev => [...prev, ...toAdd]);
+                  // 닫진 않음 — 여러 세션에서 연속 선택 가능하도록 유지. 세션만 초기화.
+                  setRemotePickerSelected(new Set());
+                }}
+              >선택 항목 추가 ({remotePickerSelected.size}개)</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBcastFileXfer && (
+        <div className="session-editor-backdrop" onClick={() => !bcastXferInProgress && setShowBcastFileXfer(false)}>
+          <div className="session-editor" onClick={e => e.stopPropagation()} style={{ width: 620, maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}>
+            <h3>📤 일괄 파일 전송</h3>
+
+            <label style={{ fontSize: 12, color: '#bbb', marginTop: 8 }}>대상 세션</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <select value={broadcastScope} onChange={e => setBroadcastScope(e.target.value as any)} style={{ flex: 1 }}>
+                <option value="visible">보이는 세션 모두</option>
+                <option value="current">현재 세션</option>
+                <option value="connected">연결된 세션 전체</option>
+              </select>
+              <span style={{ color: '#8ab', fontSize: 12 }}>{collectBroadcastTargets(broadcastScope).length}개</span>
+            </div>
+
+            <label style={{ fontSize: 12, color: '#bbb', marginTop: 12 }}>원격 경로 (비우면 각 세션의 현재 경로 사용)</label>
+            <input type="text" value={bcastXferPath} onChange={e => setBcastXferPath(e.target.value)}
+              placeholder="예: /tmp (선택사항)" />
+
+            <label style={{ fontSize: 12, color: '#bbb', marginTop: 12 }}>업로드할 파일/폴더</label>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+              <button onClick={async () => {
+                const r: any = await (window as any).api?.pickFiles?.(true);
+                if (r?.paths?.length) {
+                  setBcastXferFiles(prev => [...prev, ...r.paths.map((p: string) => ({ path: p, isFolder: false }))]);
+                }
+              }}>+ 로컬 파일</button>
+              <button onClick={async () => {
+                const r: any = await (window as any).api?.pickFolder?.();
+                if (r?.path) setBcastXferFiles(prev => [...prev, { path: r.path, isFolder: true }]);
+              }}>+ 로컬 폴더</button>
+              <button onClick={() => {
+                // 전체 세션 리스트에서 선택 — 미연결이면 백그라운드 연결
+                setRemotePickerSessionId('');
+                setRemotePickerConnId('');
+                setRemotePickerPath('');
+                setRemotePickerFiles([]);
+                setRemotePickerSelected(new Set());
+                setRemotePickerOpen(true);
+              }}>+ 원격 파일 (다른 서버)</button>
+              <button onClick={() => setBcastXferFiles([])} disabled={bcastXferFiles.length === 0}>모두 제거</button>
+            </div>
+            <div style={{ flex: 1, minHeight: 100, maxHeight: 220, overflowY: 'auto', border: '1px solid #333', borderRadius: 4, padding: 6, background: '#161616' }}>
+              {bcastXferFiles.length === 0 ? (
+                <div style={{ color: '#666', fontSize: 12, textAlign: 'center', padding: 16 }}>파일 또는 폴더를 추가하세요</div>
+              ) : (
+                bcastXferFiles.map((f, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '3px 6px', gap: 6 }}>
+                    <span style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={`${f.sourceTermId ? `원격(${f.sourceLabel}):` : '로컬:'} ${f.path}`}>
+                      {f.sourceTermId ? '🌐' : '💻'} {f.isFolder ? '📁' : '📄'} {f.path}
+                      {f.sourceTermId && <span style={{ color: '#8ab', fontSize: 10, marginLeft: 6 }}>[{f.sourceLabel}]</span>}
+                    </span>
+                    <button onClick={() => setBcastXferFiles(prev => prev.filter((_, idx) => idx !== i))} style={{ padding: '0 8px' }}>✕</button>
+                  </div>
+                ))
+              )}
+            </div>
+            {bcastXferLog.length > 0 && (
+              <div style={{ maxHeight: 120, overflowY: 'auto', fontSize: 11, fontFamily: 'monospace', color: '#aaa', background: '#0c0c0c', padding: 6, borderRadius: 4, marginTop: 8 }}>
+                {bcastXferLog.map((l, i) => (
+                  <div key={i} style={{ color: l.startsWith('✓') ? '#7fcf6e' : (l.startsWith('✗') ? '#e36b6b' : '#aaa') }}>{l}</div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+              <button onClick={() => setShowBcastFileXfer(false)} disabled={bcastXferInProgress}>닫기</button>
+              <button className="primary" disabled={bcastXferInProgress || bcastXferFiles.length === 0 || collectBroadcastTargets(broadcastScope).length === 0}
+                onClick={async () => {
+                  const targets = collectBroadcastTargets(broadcastScope);
+                  if (targets.length === 0) { flashBroadcastNotice('대상 세션이 없습니다', 'warn'); return; }
+                  setBcastXferInProgress(true);
+                  setBcastXferLog([`▶ ${targets.length}개 세션 × ${bcastXferFiles.length}개 항목 전송 시작`]);
+                  const override = bcastXferPath.trim();
+                  let okCount = 0;
+                  let errCount = 0;
+                  for (const tid of targets) {
+                    const basePath = override || getCurrentPwdForTerm(tid) || '/';
+                    const info = getTermSessionInfo(tid);
+                    const label = info?.sessionName || tid.slice(-6);
+                    for (const f of bcastXferFiles) {
+                      const filename = f.path.replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
+                      const remotePath = basePath.endsWith('/') ? basePath + filename : basePath + '/' + filename;
+                      // 동일 세션은 source == target 이므로 skip
+                      if (f.sourceTermId && f.sourceTermId === tid) {
+                        setBcastXferLog(prev => [...prev, `↷ ${label}: ${filename} (소스와 동일 세션, 건너뜀)`]);
+                        continue;
+                      }
+                      const src: any = f.sourceTermId
+                        ? { mode: 'remote', termId: f.sourceTermId, path: f.path }
+                        : { mode: 'local', path: f.path };
+                      try {
+                        const r: any = await (window as any).api?.feTransfer?.(
+                          src,
+                          { mode: 'remote', termId: tid, path: remotePath },
+                          filename,
+                        );
+                        if (r?.success) {
+                          okCount++;
+                          setBcastXferLog(prev => [...prev, `✓ ${label}: ${filename} → ${basePath}`]);
+                        } else {
+                          errCount++;
+                          setBcastXferLog(prev => [...prev, `✗ ${label}: ${filename} — ${r?.error || 'unknown'}`]);
+                        }
+                      } catch (err: any) {
+                        errCount++;
+                        setBcastXferLog(prev => [...prev, `✗ ${label}: ${filename} — ${err?.message || err}`]);
+                      }
+                    }
+                  }
+                  setBcastXferLog(prev => [...prev, `● 완료: 성공 ${okCount}, 실패 ${errCount}`]);
+                  setBcastXferInProgress(false);
+                  flashBroadcastNotice(`파일전송 완료 (성공 ${okCount}/${okCount + errCount})`, errCount === 0 ? 'ok' : 'warn');
+                }}>
+                {bcastXferInProgress ? '전송 중...' : '전송'}
+              </button>
             </div>
           </div>
         </div>

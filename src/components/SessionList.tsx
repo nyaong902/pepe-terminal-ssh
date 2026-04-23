@@ -1,5 +1,5 @@
 // src/components/SessionList.tsx
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { SessionEditor } from './SessionEditor';
 
 type LoginScriptRule = {
@@ -33,7 +33,7 @@ type Folder = {
 
 type Props = {
   onConnect: (sessionId: string, sessionName: string, targetPanelId?: string | null, sessionTheme?: string, fontFamily?: string, fontSize?: number, scrollback?: number) => void;
-  onMultiConnect?: (sessions: Session[], mode: 'minitab' | 'split-h' | 'split-v') => void;
+  onMultiConnect?: (sessions: Session[], mode: 'minitab' | 'split-h' | 'split-v' | 'split-tile') => void;
   onFileTransfer?: (sessionId: string, sessionName: string) => void;
   onDisconnect?: (targetPanelId?: string | null) => void;
   targetPanelId?: string | null;
@@ -250,6 +250,33 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
 
   const selectedSession = selectedType === 'session' ? sessions.find(x => x.id === selectedId) : null;
 
+  // 현재 렌더되는 세션 ID 의 순서 (shift-click 범위 선택용)
+  const visibleSessionIds = useMemo<string[]>(() => {
+    const result: string[] = [];
+    const walk = (parentId?: string) => {
+      const key = parentId || '__root__';
+      const order = childOrder[key];
+      const childFolders = folders.filter(f => (f.parentId ?? undefined) === parentId);
+      const childSessions = sessions.filter(s => (s.folderId ?? undefined) === parentId);
+      const allIds = order
+        ? [...order.filter(id => childFolders.some(f => f.id === id) || childSessions.some(s => s.id === id)),
+           ...childFolders.filter(f => !order.includes(f.id)).map(f => f.id),
+           ...childSessions.filter(s => !order.includes(s.id)).map(s => s.id)]
+        : [...childFolders.map(f => f.id), ...childSessions.map(s => s.id)];
+      for (const id of allIds) {
+        const f = childFolders.find(x => x.id === id);
+        if (f) {
+          if (!collapsed.has(f.id)) walk(f.id);
+          continue;
+        }
+        const s = childSessions.find(x => x.id === id);
+        if (s) result.push(s.id);
+      }
+    };
+    walk(undefined);
+    return result;
+  }, [sessions, folders, childOrder, collapsed]);
+
   // 재귀 트리 렌더링 — childOrder 기반 혼합 순서
   const renderTree = (parentId?: string, depth = 0) => {
     const key = parentId || '__root__';
@@ -304,7 +331,16 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
                 className={`session-item ${(selectedId === s.id && selectedType === 'session') || selectedIds.has(s.id) ? 'selected' : ''}`}
                 style={{ paddingLeft: 8 + depth * 16 }}
                 onClick={e => {
-                  if (e.ctrlKey || e.metaKey) {
+                  if (e.shiftKey) {
+                    // 범위 선택: anchor(selectedId) ~ 클릭 위치까지 모두 추가
+                    const anchor = selectedId && visibleSessionIds.includes(selectedId) ? selectedId : (visibleSessionIds[0] || s.id);
+                    const startIdx = visibleSessionIds.indexOf(anchor);
+                    const endIdx = visibleSessionIds.indexOf(s.id);
+                    if (startIdx >= 0 && endIdx >= 0) {
+                      const [lo, hi] = startIdx <= endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+                      setSelectedIds(new Set(visibleSessionIds.slice(lo, hi + 1)));
+                    }
+                  } else if (e.ctrlKey || e.metaKey) {
                     setSelectedIds(prev => { const next = new Set(prev); if (next.size === 0 && selectedId) next.add(selectedId); next.has(s.id) ? next.delete(s.id) : next.add(s.id); return next; });
                   } else {
                     // 같은 세션 재클릭 → 선택 해제 (encoding 창 닫힘)
@@ -551,6 +587,12 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
                       setContextMenu(null); setSelectedIds(new Set());
                     }}>
                       ▄ 가로 분할로 연결
+                    </div>
+                    <div className="context-menu-item" onClick={() => {
+                      onMultiConnect?.(selectedSessions, 'split-tile');
+                      setContextMenu(null); setSelectedIds(new Set());
+                    }}>
+                      ⊞ 타일 분할로 연결
                     </div>
                     <div className="context-menu-separator" />
                   </>

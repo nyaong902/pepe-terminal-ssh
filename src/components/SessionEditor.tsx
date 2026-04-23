@@ -26,6 +26,10 @@ type Session = {
   scrollback?: number;
   icon?: string;
   initialPath?: string;
+  jumpTargetHost?: string;
+  jumpTargetUser?: string;
+  jumpTargetPort?: number;
+  jumpTargetPassword?: string;
 };
 
 type Folder = {
@@ -59,6 +63,11 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
   const [scrollback, setScrollback] = useState(session?.scrollback ?? 0);
   const [icon, setIcon] = useState(session?.icon ?? '🖥️');
   const [initialPath, setInitialPath] = useState(session?.initialPath ?? '');
+  const [jumpTargetHost, setJumpTargetHost] = useState(session?.jumpTargetHost ?? '');
+  const [jumpTargetUser, setJumpTargetUser] = useState(session?.jumpTargetUser ?? '');
+  const [jumpTargetPort, setJumpTargetPort] = useState<number | ''>(session?.jumpTargetPort ?? '');
+  const [jumpTargetPassword, setJumpTargetPassword] = useState(session?.jumpTargetPassword ?? '');
+  const [showJumpPassword, setShowJumpPassword] = useState(false);
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -80,6 +89,10 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
     setScrollback(session?.scrollback ?? 0);
     setIcon(session?.icon ?? '🖥️');
     setInitialPath(session?.initialPath ?? '');
+    setJumpTargetHost(session?.jumpTargetHost ?? '');
+    setJumpTargetUser(session?.jumpTargetUser ?? '');
+    setJumpTargetPort(session?.jumpTargetPort ?? '');
+    setJumpTargetPassword(session?.jumpTargetPassword ?? '');
   }, [session]);
 
   const getFolderPath = (f: Folder): string => {
@@ -123,7 +136,7 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
     setSaveError('');
     const auth = authType === 'password' ? { type: 'password', password } : { type: 'key', keyPath };
     const script = loginScript.filter(r => r.expect.trim() !== '' || r.send.trim() !== '');
-    onSave({ id, name, host: normalizeHost(host), port, username, auth, encoding, folderId: folderId || undefined, loginScript: script.length > 0 ? script : undefined, theme: theme || undefined, fontFamily: fontFamily || undefined, fontSize: fontSize || undefined, scrollback: scrollback || undefined, icon: icon || undefined, initialPath: initialPath.trim() || undefined } as Session);
+    onSave({ id, name, host: normalizeHost(host), port, username, auth, encoding, folderId: folderId || undefined, loginScript: script.length > 0 ? script : undefined, theme: theme || undefined, fontFamily: fontFamily || undefined, fontSize: fontSize || undefined, scrollback: scrollback || undefined, icon: icon || undefined, initialPath: initialPath.trim() || undefined, jumpTargetHost: jumpTargetHost.trim() || undefined, jumpTargetUser: jumpTargetUser.trim() || undefined, jumpTargetPort: typeof jumpTargetPort === 'number' && jumpTargetPort > 0 ? jumpTargetPort : undefined, jumpTargetPassword: jumpTargetPassword || undefined } as Session);
   };
 
   return (
@@ -234,6 +247,54 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
             onChange={e => setInitialPath(e.target.value)}
             placeholder="예: /home/user/project (비우면 홈 디렉토리)"
           />
+
+          <label>점프 타겟 호스트 (ProxyJump)</label>
+          <input
+            type="text"
+            value={jumpTargetHost}
+            onChange={e => setJumpTargetHost(e.target.value)}
+            placeholder="예: I-MPM01 (비우면 직접 연결)"
+            title="값이 있으면 primary 호스트를 경유해서 이 타겟으로 SSH + SFTP 직결. primary 의 ~/.ssh/ 에 등록된 키를 자동 사용."
+          />
+
+          <label>점프 타겟 사용자</label>
+          <input
+            type="text"
+            value={jumpTargetUser}
+            onChange={e => setJumpTargetUser(e.target.value)}
+            placeholder="예: root"
+            disabled={!jumpTargetHost.trim()}
+          />
+
+          <label>점프 타겟 포트</label>
+          <input
+            type="number"
+            value={jumpTargetPort}
+            onChange={e => setJumpTargetPort(Number(e.target.value) || '')}
+            placeholder="22"
+            disabled={!jumpTargetHost.trim()}
+            min={1}
+            max={65535}
+          />
+
+          <label>점프 타겟 비밀번호</label>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <input
+              type={showJumpPassword ? 'text' : 'password'}
+              value={jumpTargetPassword}
+              onChange={e => setJumpTargetPassword(e.target.value)}
+              placeholder="비우면 primary 의 ~/.ssh/id_rsa 자동 사용"
+              disabled={!jumpTargetHost.trim()}
+              style={{ flex: 1 }}
+              autoComplete="off"
+            />
+            <button
+              type="button"
+              onClick={() => setShowJumpPassword(v => !v)}
+              disabled={!jumpTargetHost.trim()}
+              title={showJumpPassword ? '숨기기' : '보이기'}
+            >{showJumpPassword ? '🙈' : '👁'}</button>
+          </div>
         </div>
 
         {/* ── 로그인 스크립트 ── */}

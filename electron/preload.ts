@@ -35,13 +35,16 @@ contextBridge.exposeInMainWorld('api', {
   feDelete: (mode: string, filePath: string, termId?: string) => ipcRenderer.invoke('fe:delete', { mode, termId, filePath }),
   feRename: (mode: string, oldPath: string, newPath: string, termId?: string) => ipcRenderer.invoke('fe:rename', { mode, termId, oldPath, newPath }),
   feHomeDir: (mode: string, termId?: string) => ipcRenderer.invoke('fe:home-dir', { mode, termId }),
-  feSftpConnect: (connId: string, host: string, port: number, username: string, auth?: any) => ipcRenderer.invoke('fe:sftp-connect', { connId, host, port, username, auth }),
+  feSftpConnect: (connId: string, host: string, port: number, username: string, auth?: any, jumpOpts?: { host: string; user?: string; port?: number; password?: string }) => ipcRenderer.invoke('fe:sftp-connect', { connId, host, port, username, auth, jumpOpts }),
+  pickFiles: (multi?: boolean) => ipcRenderer.invoke('dialog:pick-files', { multi }),
+  pickFolder: () => ipcRenderer.invoke('dialog:pick-folder'),
   feSftpDisconnect: (connId: string) => ipcRenderer.invoke('fe:sftp-disconnect', { connId }),
   feConnectedSessions: () => ipcRenderer.invoke('fe:connected-sessions'),
 
   // SFTP
-  sftpDownload: (panelId: string, remotePath: string) => ipcRenderer.invoke('sftp:download', { panelId, remotePath }),
-  sftpUpload: (panelId: string, remotePath: string) => ipcRenderer.invoke('sftp:upload', { panelId, remotePath }),
+  sftpDownload: (panelId: string, remotePath: string, isDir?: boolean) => ipcRenderer.invoke('sftp:download', { panelId, remotePath, isDir }),
+  sftpDownloadMulti: (panelId: string, items: { path: string; isDir: boolean }[]) => ipcRenderer.invoke('sftp:download-multi', { panelId, items }),
+  sftpUpload: (panelId: string, remotePath: string, kind?: 'file' | 'folder' | 'multi-file') => ipcRenderer.invoke('sftp:upload', { panelId, remotePath, kind }),
   sftpListDir: (panelId: string, remotePath: string) => ipcRenderer.invoke('sftp:list-dir', { panelId, remotePath }),
   sftpReadFile: (panelId: string, remotePath: string, encoding?: string) => ipcRenderer.invoke('sftp:read-file', { panelId, remotePath, encoding }),
   sftpWriteFile: (panelId: string, remotePath: string, content: string, encoding?: string) => ipcRenderer.invoke('sftp:write-file', { panelId, remotePath, content, encoding }),
@@ -68,6 +71,11 @@ contextBridge.exposeInMainWorld('api', {
     const listener = (_e: any, m: boolean) => cb(m);
     ipcRenderer.on('window:maximized', listener);
     return () => ipcRenderer.removeListener('window:maximized', listener);
+  },
+  onDebugLog: (cb: (msg: string) => void) => {
+    const listener = (_e: any, msg: string) => cb(msg);
+    ipcRenderer.on('debug:log', listener);
+    return () => ipcRenderer.removeListener('debug:log', listener);
   },
 
   // SSH control

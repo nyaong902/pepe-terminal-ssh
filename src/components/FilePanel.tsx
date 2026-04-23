@@ -10,8 +10,10 @@ export type FileInfo = {
 };
 
 export type PanelSource = {
-  mode: 'local' | 'remote';
+  // 'lazy-remote' 는 아직 연결되지 않은 원격 세션 (FileExplorer 가 선택 시 자동 SFTP 연결)
+  mode: 'local' | 'remote' | 'lazy-remote';
   termId?: string;
+  sessionId?: string; // lazy-remote 용 식별자
   label: string;
 };
 
@@ -186,15 +188,15 @@ export const FilePanel: React.FC<Props> = ({ source, sources, onSourceChange, se
         {source.mode === 'remote' && onDisconnect && (
           <button className="fe-disconnect-btn" onClick={onDisconnect} title="연결 끊기">✕</button>
         )}
-        <select className="fe-source-select" value={`${source.mode}:${source.termId || ''}`}
+        <select className="fe-source-select" value={`${source.mode}:${source.termId || source.sessionId || ''}`}
           onChange={e => {
-            const [m, t] = e.target.value.split(':');
-            const s = sources.find(s => s.mode === m && (s.termId || '') === t);
+            const [m, t] = [e.target.value.split(':')[0], e.target.value.split(':').slice(1).join(':')];
+            const s = sources.find(s => s.mode === m && ((s.termId || s.sessionId || '') === t));
             if (s) onSourceChange(s);
           }}
         >
           {sources.map(s => (
-            <option key={`${s.mode}:${s.termId || ''}`} value={`${s.mode}:${s.termId || ''}`}>{s.label}</option>
+            <option key={`${s.mode}:${s.termId || s.sessionId || ''}`} value={`${s.mode}:${s.termId || s.sessionId || ''}`}>{s.label}</option>
           ))}
         </select>
       </div>
