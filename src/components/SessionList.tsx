@@ -53,9 +53,11 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
   const [selectedType, setSelectedType] = useState<'session' | 'folder'>('session');
   const [editing, setEditing] = useState<Session | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    // 초기엔 localStorage 값으로 시작 (호환용) — UIPrefs 로드 후 덮어씀
     try { return new Set(JSON.parse(window.localStorage.getItem('collapsedFolders') ?? '[]')); }
     catch { return new Set(); }
   });
+  const collapsedLoadedRef = useRef(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renamingType, setRenamingType] = useState<'session' | 'folder'>('folder');
   const [renameValue, setRenameValue] = useState('');
@@ -77,11 +79,13 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
     return () => window.removeEventListener('sessions-reload', handler);
   }, []);
 
+  // collapsed 폴더 목록 UIPrefs 에 저장 (재시작 후 유지)
   useEffect(() => {
-    window.localStorage.setItem('collapsedFolders', JSON.stringify([...collapsed]));
+    if (!collapsedLoadedRef.current) return;
+    try { (window as any).api?.setUIPrefs?.({ collapsedFolders: [...collapsed] }); } catch {}
   }, [collapsed]);
 
-  // ui-prefs 에서 pinned 상태 로드
+  // ui-prefs 에서 pinned + collapsedFolders 로드
   useEffect(() => {
     (async () => {
       try {
@@ -90,8 +94,12 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
           setPinned(prefs.sidebarPinned);
           if (!prefs.sidebarPinned) setVisible(false);
         }
+        if (prefs && Array.isArray(prefs.collapsedFolders)) {
+          setCollapsed(new Set(prefs.collapsedFolders));
+        }
       } catch {}
       pinnedLoadedRef.current = true;
+      collapsedLoadedRef.current = true;
     })();
   }, []);
   useEffect(() => {

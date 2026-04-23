@@ -49,7 +49,7 @@ export const QuickConnectBar: React.FC<Props> = ({ onConnect, onCancel, forcePro
 
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') { e.preventDefault(); submit(); }
-    else if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+    // Esc 는 무시 — 닫기는 ✕ 버튼으로만
   };
 
   return (

@@ -1729,6 +1729,7 @@ html, body {
 .session-editor {
   width: 560px;
   max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 80px);
   background: #111;
   color: #eee;
   padding: 20px;
@@ -1736,6 +1737,45 @@ html, body {
   border: 1px solid #333;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
   box-sizing: border-box;
+  overflow-y: auto;
+}
+.session-editor h3 { margin-top: 0; position: sticky; top: -20px; background: #111; padding: 0 0 8px; margin: 0 0 16px; z-index: 5; }
+
+/* 자동추적 체크박스 옆 정보 아이콘 + 플로팅 툴팁 */
+.autotrack-info-icon {
+  color: #666;
+  font-size: 13px;
+  cursor: help;
+}
+.autotrack-checkbox-label:hover .autotrack-info-icon { color: #9cf; }
+.autotrack-tooltip {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: #1a2030;
+  color: #cde;
+  font-size: 11px;
+  font-weight: normal;
+  padding: 6px 10px;
+  border: 1px solid #3a5075;
+  border-radius: 4px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+  z-index: 1500;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+.autotrack-checkbox-label:hover .autotrack-tooltip { opacity: 1; }
+.session-editor-actions {
+  position: sticky;
+  bottom: -20px;
+  background: #111;
+  padding: 10px 0 0;
+  margin-top: 12px;
+  border-top: 1px solid #222;
+  z-index: 5;
 }
 
 .session-editor h3 {
@@ -2725,6 +2765,127 @@ html, body {
 }
 
 /* ── Remote File Tree ── */
+/* 워크스페이스 레벨 파일 트리 — 선택된 패널 세션의 내용 표시. 같은 워크스페이스 내 모든 패널이 하나의 트리 공유. */
+.workspace-file-tree {
+  background: #0d0f10;
+  border-right: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  min-width: 160px;
+  max-width: 800px;
+}
+.workspace-file-tree-resizer {
+  position: absolute;
+  right: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  z-index: 10;
+  background: transparent;
+  transition: background 0.15s;
+}
+.workspace-file-tree-resizer:hover,
+.workspace-file-tree-resizer:active {
+  background: rgba(74, 144, 226, 0.4);
+}
+/* auto-hide 모드 — 트리거 오른쪽에 오버레이로 떠서 열림/닫힘 */
+.workspace-file-tree.auto-hide {
+  position: absolute;
+  left: 22px;  /* 세션 사이드바 pinned 일 때: 트리거(22px) 오른쪽 */
+  top: 0;
+  bottom: 0;
+  z-index: 1350;
+  transition: transform 0.2s ease-out;
+  box-shadow: 4px 0 16px rgba(0,0,0,0.5);
+}
+.workspace-file-tree.auto-hide.top { z-index: 1420; }
+/* 세션 사이드바도 동시에 unpin → hover 에 따라 상위 변경 */
+.app-root.top-panel-session .session-sidebar-inner.auto-hide { z-index: 1410 !important; }
+.app-root.top-panel-filetree .workspace-file-tree.auto-hide { z-index: 1420 !important; }
+.workspace-file-tree.auto-hide.hidden {
+  transform: translateX(calc(-100% - 22px));
+  pointer-events: none;
+}
+/* 세션 사이드바도 unpinned 이면 파일트리 트리거가 워크스페이스 밖(fixed)에 있으니 panel 은 left:0 */
+.app-root:has(.session-sidebar-inner.auto-hide) .workspace-file-tree.auto-hide {
+  left: 0;
+}
+.app-root:has(.session-sidebar-inner.auto-hide) .workspace-file-tree.auto-hide.hidden {
+  transform: translateX(-100%);
+}
+/* 파일트리 트리거 기본 (세션 사이드바 pinned 상태) — inline flex 로 사이드바 옆 배치 */
+.workspace-file-tree-trigger {
+  width: 22px;
+  flex-shrink: 0;
+  background: #0d0f10;
+  border-right: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  margin-top: 40px;
+}
+/* 세션 사이드바가 unpinned (auto-hide) 일 때 — 세션 트리거 아래에 fixed 로 스택. 간격 없음. */
+.app-root:has(.session-sidebar-inner.auto-hide) .workspace-file-tree-trigger {
+  position: fixed;
+  top: var(--file-tree-trigger-top, 135px);
+  left: 0;
+  bottom: 24px;
+  margin-top: 0;
+  z-index: 2;
+  border-top: 1px solid #333;
+}
+.workspace-file-tree-trigger-top {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 8px 0;
+  border-bottom: 1px solid #333;
+  transition: background 0.15s;
+}
+.workspace-file-tree-trigger-top:hover {
+  background: #1a1a2e;
+}
+.workspace-file-tree-trigger-top:hover .workspace-file-tree-trigger-text {
+  color: #ccc;
+}
+.workspace-file-tree-trigger-bottom { flex: 1; }
+.workspace-file-tree-trigger-text {
+  color: #888;
+  font-size: 11px;
+  user-select: none;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  letter-spacing: 2px;
+}
+/* Pin 버튼 툴바 */
+.workspace-file-tree-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 2px 4px;
+  border-bottom: 1px solid #2a3a50;
+  flex-shrink: 0;
+}
+.workspace-file-tree-pin {
+  background: transparent;
+  border: none;
+  color: #777;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  opacity: 0.55;
+  transform: rotate(45deg);
+  transition: transform 0.15s, opacity 0.15s;
+}
+.workspace-file-tree-pin:hover { opacity: 1; }
+.workspace-file-tree-pin.pinned {
+  opacity: 1;
+  transform: rotate(0deg);
+  color: #ffb347;
+}
+
 .remote-file-tree-container {
   width: 240px;
   min-width: 160px;

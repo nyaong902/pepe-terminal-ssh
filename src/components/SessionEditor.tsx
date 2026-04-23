@@ -26,6 +26,7 @@ type Session = {
   scrollback?: number;
   icon?: string;
   initialPath?: string;
+  autoTrackPwd?: boolean;
   jumpTargetHost?: string;
   jumpTargetUser?: string;
   jumpTargetPort?: number;
@@ -63,6 +64,7 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
   const [scrollback, setScrollback] = useState(session?.scrollback ?? 0);
   const [icon, setIcon] = useState(session?.icon ?? '🖥️');
   const [initialPath, setInitialPath] = useState(session?.initialPath ?? '');
+  const [autoTrackPwd, setAutoTrackPwd] = useState<boolean>(!!session?.autoTrackPwd);
   const [jumpTargetHost, setJumpTargetHost] = useState(session?.jumpTargetHost ?? '');
   const [jumpTargetUser, setJumpTargetUser] = useState(session?.jumpTargetUser ?? '');
   const [jumpTargetPort, setJumpTargetPort] = useState<number | ''>(session?.jumpTargetPort ?? '');
@@ -89,6 +91,7 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
     setScrollback(session?.scrollback ?? 0);
     setIcon(session?.icon ?? '🖥️');
     setInitialPath(session?.initialPath ?? '');
+    setAutoTrackPwd(!!session?.autoTrackPwd);
     setJumpTargetHost(session?.jumpTargetHost ?? '');
     setJumpTargetUser(session?.jumpTargetUser ?? '');
     setJumpTargetPort(session?.jumpTargetPort ?? '');
@@ -136,7 +139,7 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
     setSaveError('');
     const auth = authType === 'password' ? { type: 'password', password } : { type: 'key', keyPath };
     const script = loginScript.filter(r => r.expect.trim() !== '' || r.send.trim() !== '');
-    onSave({ id, name, host: normalizeHost(host), port, username, auth, encoding, folderId: folderId || undefined, loginScript: script.length > 0 ? script : undefined, theme: theme || undefined, fontFamily: fontFamily || undefined, fontSize: fontSize || undefined, scrollback: scrollback || undefined, icon: icon || undefined, initialPath: initialPath.trim() || undefined, jumpTargetHost: jumpTargetHost.trim() || undefined, jumpTargetUser: jumpTargetUser.trim() || undefined, jumpTargetPort: typeof jumpTargetPort === 'number' && jumpTargetPort > 0 ? jumpTargetPort : undefined, jumpTargetPassword: jumpTargetPassword || undefined } as Session);
+    onSave({ id, name, host: normalizeHost(host), port, username, auth, encoding, folderId: folderId || undefined, loginScript: script.length > 0 ? script : undefined, theme: theme || undefined, fontFamily: fontFamily || undefined, fontSize: fontSize || undefined, scrollback: scrollback || undefined, icon: icon || undefined, initialPath: initialPath.trim() || undefined, autoTrackPwd: autoTrackPwd || undefined, jumpTargetHost: jumpTargetHost.trim() || undefined, jumpTargetUser: jumpTargetUser.trim() || undefined, jumpTargetPort: typeof jumpTargetPort === 'number' && jumpTargetPort > 0 ? jumpTargetPort : undefined, jumpTargetPassword: jumpTargetPassword || undefined } as Session);
   };
 
   return (
@@ -247,6 +250,21 @@ export const SessionEditor: React.FC<Props> = ({ session, folders = [], onSave, 
             onChange={e => setInitialPath(e.target.value)}
             placeholder="예: /home/user/project (비우면 홈 디렉토리)"
           />
+
+          <label>파일트리 자동추적</label>
+          <label
+            className="autotrack-checkbox-label"
+            title="터미널에서 디렉토리 이동 시 파일트리도 갱신됨 (주입 명령 잠깐 보일 수 있음)"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer', position: 'relative', justifySelf: 'start' }}
+          >
+            <input
+              type="checkbox"
+              checked={autoTrackPwd}
+              onChange={e => setAutoTrackPwd(e.target.checked)}
+              style={{ margin: 0 }}
+            />
+            <span className="autotrack-info-icon" title="터미널에서 디렉토리 이동 시 파일트리도 갱신됨 (주입 명령 잠깐 보일 수 있음)">ⓘ</span>
+          </label>
 
           <label>점프 타겟 호스트 (ProxyJump)</label>
           <input
