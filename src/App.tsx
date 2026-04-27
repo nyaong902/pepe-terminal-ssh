@@ -12,7 +12,7 @@ import { ClaudeChat } from './components/ClaudeChat';
 import { RemoteFileTree } from './components/RemoteFileTree';
 import { QuickConnectBar, QuickConnectResult } from './components/QuickConnectDialog';
 import { StatusBar } from './components/StatusBar';
-import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect, toggleTreeVisibleForTerm, startInitialConnectWatchdog, getCurrentPwdForTerm } from './components/TerminalPanel';
+import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermConnecting, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect, toggleTreeVisibleForTerm, startInitialConnectWatchdog, getCurrentPwdForTerm } from './components/TerminalPanel';
 import { marked } from 'marked';
 // @ts-ignore — vite ?raw 로 docs/MANUAL.md 를 번들 문자열로 임베드
 import manualMd from '../docs/MANUAL.md?raw';
@@ -358,7 +358,63 @@ function App() {
       active.scrollIntoView({ block: 'nearest' });
     }
   }, [broadcastHistoryIdx, broadcastShowHistory]);
-  const [splitSessionPicker, setSplitSessionPicker] = useState<{ dir: 'row' | 'column'; sessions: { sessionId: string; sessionName: string; host: string; termId: string }[]; srcTermId?: string; targetNodeId: string } | null>(null);
+  const [splitSessionPicker, setSplitSessionPicker] = useState<{
+    dir: 'row' | 'column';
+    sessions: { sessionId: string; sessionName: string; host: string; termId: string; folderId?: string; icon?: string }[];
+    folders: { id: string; name: string; parentId?: string }[];
+    srcTermId?: string;
+    targetNodeId: string;
+  } | null>(null);
+  const [splitPickerCollapsed, setSplitPickerCollapsed] = useState<Set<string>>(new Set());
+
+  // 세션 선택 picker prefix 키 핸들러 — 파일 트리와 동일한 동작 (folder + session 가시 항목 순회, startsWith, 같은 키 반복 시 순환)
+  const splitPickerLastSelectedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!splitSessionPicker) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { setSplitSessionPicker(null); e.preventDefault(); e.stopPropagation(); return; }
+      if (e.key.length !== 1 || e.ctrlKey || e.altKey || e.metaKey) return;
+      const { sessions, folders } = splitSessionPicker;
+      // 폴더 + 세션 모두 가시 순서대로 flatten (트리에 보이는 그대로)
+      const items: { id: string; name: string; type: 'folder' | 'session'; data?: any }[] = [];
+      const walk = (parentId?: string) => {
+        const subF = folders.filter(f => (f.parentId ?? undefined) === (parentId ?? undefined));
+        for (const f of subF) {
+          items.push({ id: f.id, name: f.name, type: 'folder' });
+          if (!splitPickerCollapsed.has(f.id)) walk(f.id);
+        }
+        const subS = sessions.filter(s => (s.folderId ?? undefined) === (parentId ?? undefined));
+        for (const s of subS) {
+          items.push({ id: s.sessionId, name: s.sessionName, type: 'session', data: s });
+        }
+      };
+      walk(undefined);
+      const ch = e.key.toLowerCase();
+      const lastId = splitPickerLastSelectedRef.current;
+      const curIdx = lastId ? items.findIndex(it => it.id === lastId) : -1;
+      let target = -1;
+      for (let i = 1; i <= items.length; i++) {
+        const idx = (curIdx + i) % items.length;
+        if (items[idx].name.toLowerCase().startsWith(ch)) { target = idx; break; }
+      }
+      if (target < 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const it = items[target];
+      splitPickerLastSelectedRef.current = it.id;
+      setTimeout(() => {
+        const sel = it.type === 'session'
+          ? `.folder-picker .folder-picker-item[data-sid="${CSS.escape(it.id)}"]`
+          : `.folder-picker .folder-picker-item.folder-row[data-fid="${CSS.escape(it.id)}"]`;
+        const el = document.querySelector(sel) as HTMLElement | null;
+        el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        el?.classList.add('picker-highlight');
+        setTimeout(() => el?.classList.remove('picker-highlight'), 800);
+      }, 0);
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [splitSessionPicker, splitPickerCollapsed]);
   const [floatingPanelId, setFloatingPanelId] = useState<string | null>(null);
   const [remoteTreeWidth, setRemoteTreeWidth] = useState<number>(240);
   const remoteTreeWidthLoadedRef = useRef(false);
@@ -479,12 +535,51 @@ function App() {
   }, []);
 
   useEffect(() => {
-    document.querySelectorAll('.layout-leaf.fs-visible').forEach(el => el.classList.remove('fs-visible'));
-    if (fullscreenTermId) {
-      const target = document.querySelector(`.layout-leaf[data-active-term="${fullscreenTermId}"]`);
-      if (target) target.classList.add('fs-visible');
+    // DOM 이 아직 업데이트 안 됐을 수 있으므로 다음 프레임에 실행.
+    // 분할 / 창 크기 조정 / 미니탭 전환 등으로 레이아웃이 바뀌어도 재적용.
+    const apply = () => {
+      document.querySelectorAll('.layout-leaf.fs-visible').forEach(el => el.classList.remove('fs-visible'));
+      if (fullscreenTermId) {
+        const target = document.querySelector(`.layout-leaf[data-active-term="${fullscreenTermId}"]`);
+        if (target) target.classList.add('fs-visible');
+      }
+    };
+    apply();
+    const t1 = requestAnimationFrame(apply);
+    const t2 = setTimeout(apply, 100);
+    return () => { cancelAnimationFrame(t1); clearTimeout(t2); };
+  }, [fullscreenTermId, activeTabId, tabs]);
+
+  // 워크스페이스 전환 시 전체화면이면 새 워크스페이스의 선택된/첫번째 연결 패널로 fs-visible 전환
+  useEffect(() => {
+    if (!fullscreenTermId) return;
+    const tab = tabs.find(t => t.id === activeTabId);
+    if (!tab || tab.type === 'fileExplorer' || tab.type === 'fileEditor') {
+      setFullscreenTermId(null);
+      return;
     }
-  }, [fullscreenTermId]);
+    // 현재 fullscreenTermId 가 새 워크스페이스에 있는지 확인
+    const walk = (n: any): string[] => {
+      if (n.type === 'leaf') {
+        return (n.panel?.sessions || []).map((s: any) => s.termId);
+      }
+      return (n.children || []).flatMap(walk);
+    };
+    const termIds = walk(tab.layout);
+    if (!termIds.includes(fullscreenTermId)) {
+      // 새 워크스페이스엔 없음 → selectedPanel 또는 첫 leaf 의 activeTermId 로 전환
+      const findFirst = (n: any): string | null => {
+        if (n.type === 'leaf') {
+          const s = n.panel?.sessions?.[n.panel?.activeIdx ?? 0];
+          return s?.termId || null;
+        }
+        for (const c of (n.children || [])) { const r = findFirst(c); if (r) return r; }
+        return null;
+      };
+      const candidate = findFirst(tab.layout);
+      setFullscreenTermId(candidate);
+    }
+  }, [activeTabId, tabs, fullscreenTermId]);
 
   // 텍스트 일괄 전송 대상 termId 수집
   const collectBroadcastTargets = (scope: 'current' | 'visible' | 'connected'): string[] => {
@@ -862,31 +957,36 @@ function App() {
   // 픽커에서 선택된 세션을 새 termId 로 연결해서 targetNodeId 패널을 분할해 배치.
   // 활성 세션이 없거나 folder 내 다른 세션이 없으면 그냥 빈 분할.
   const openSplitSessionPicker = async (dir: 'row' | 'column', targetNodeId: string) => {
+    // 세션 픽커 없이 바로 빈 분할 (로컬 쉘 패널 자동 생성)
+    if (!activeTab) return;
+    splitPanel(activeTab.id, targetNodeId, dir);
+  };
+
+  // 세션 선택 팝업 — 파일트리 형식 (폴더 + 세션 계층 구조)
+  const openSplitSessionPickerWithPrompt = async (dir: 'row' | 'column', targetNodeId: string) => {
     if (!activeTab) return;
     const curTid = getActiveTermId();
-    const curInfo = curTid ? getTermSessionInfo(curTid) : null;
-    let folderSessions: { sessionId: string; sessionName: string; host: string; termId: string }[] = [];
     try {
       const data: any = await (window as any).api?.listSessions?.();
-      const all: any[] = data?.sessions ?? data ?? [];
-      if (curInfo?.sessionId) {
-        const cur = all.find(s => s.id === curInfo.sessionId);
-        const folderId = cur?.folderId;
-        folderSessions = all
-          .filter(s => (s.folderId ?? undefined) === (folderId ?? undefined))
-          .map(s => ({ sessionId: s.id, sessionName: s.name, host: s.host || '', termId: '' }));
-      } else {
-        // 활성 세션 모르면 루트(폴더 없음) 세션들
-        folderSessions = all
-          .filter(s => !s.folderId)
-          .map(s => ({ sessionId: s.id, sessionName: s.name, host: s.host || '', termId: '' }));
+      const sessions: any[] = data?.sessions ?? data ?? [];
+      const folders: any[] = data?.folders ?? [];
+      const sessionItems = sessions.map(s => ({
+        sessionId: s.id, sessionName: s.name, host: s.host || '', termId: '',
+        folderId: s.folderId, icon: s.icon,
+      }));
+      const folderItems = folders.map((f: any) => ({ id: f.id, name: f.name, parentId: f.parentId }));
+      if (sessionItems.length === 0) {
+        splitPanel(activeTab.id, targetNodeId, dir);
+        return;
       }
-    } catch {}
-    if (folderSessions.length === 0) {
+      setSplitPickerCollapsed(new Set());
+      setSplitSessionPicker({
+        dir, sessions: sessionItems, folders: folderItems,
+        srcTermId: curTid || undefined, targetNodeId,
+      });
+    } catch {
       splitPanel(activeTab.id, targetNodeId, dir);
-      return;
     }
-    setSplitSessionPicker({ dir, sessions: folderSessions, srcTermId: curTid || undefined, targetNodeId });
   };
 
   const splitPanel = (tabId: TabId, targetNodeId: string, direction: 'row' | 'column') => {
@@ -894,15 +994,26 @@ function App() {
     setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
   };
 
-  const handleSplitSessionSelect = (target: { sessionId: string; sessionName: string; host: string; termId: string }) => {
+  const handleSplitSessionSelect = async (target: { sessionId: string; sessionName: string; host: string; termId: string }) => {
     if (!activeTab || !splitSessionPicker) return;
     const { dir, targetNodeId } = splitSessionPicker;
     const newTermId = `term-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const newSess: PanelSession = { termId: newTermId, sessionId: target.sessionId, sessionName: target.sessionName };
+    // 세션 데이터에서 theme/font 가져오기
+    let fullSess: any = null;
+    try {
+      const data: any = await (window as any).api?.listSessions?.();
+      const all: any[] = data?.sessions ?? data ?? [];
+      fullSess = all.find((s: any) => s.id === target.sessionId);
+    } catch {}
     updateLayout(activeTab.id, layout => splitNodeWithSessions(layout, targetNodeId, dir, [newSess], false));
     setTimeout(async () => {
-      // 선택된 세션의 원본 termId에서 스타일 복제
-      cloneTermStyle(target.termId, newTermId);
+      // 세션 설정 적용 (theme / fontFamily / fontSize / scrollback)
+      if (fullSess?.scrollback) applyScrollbackToTerm(newTermId, fullSess.scrollback);
+      setTimeout(() => {
+        if (fullSess?.theme) applyThemeToTerm(newTermId, fullSess.theme);
+        if (fullSess?.fontFamily || fullSess?.fontSize) applyFontToTerm(newTermId, fullSess?.fontFamily, fullSess?.fontSize);
+      }, 200);
       try {
         const r = await (window as any).api.connectSSH(newTermId, target.sessionId);
         if (r === 'need-password') promptPasswordAndConnect(newTermId, target.sessionId);
@@ -1191,11 +1302,12 @@ function App() {
         return;
       }
       if (activeSess) {
-        // 연결 상태 확인 후 분기
+        // 연결 상태 확인 후 분기 — 연결 중(connecting)도 "사용 중"으로 간주해서 새 미니탭으로 추가
         const checkAndConnect = async () => {
           let connected = false;
           try { connected = await (window as any).api.isSSHConnected(activeSess.termId); } catch {}
-          if (connected) {
+          const connecting = isTermConnecting(activeSess.termId);
+          if (connected || connecting) {
             // 연결 중이면 → 같은 패널에 새 미니탭으로 추가
             const { layout, termId } = addSessionToPanel(activeTab.layout, selectedPanelId!, sessionId, displayName);
             setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, layout } : t));
@@ -1489,7 +1601,7 @@ function App() {
           let sessPath = '';
           try { sessPath = await (window as any).api.getSessionsPath(); } catch {}
           alert(
-          'PePe Terminal(SSH) v2.0.4\n\n' +
+          'PePe Terminal(SSH) v2.0.5\n\n' +
           '만든이: Claude (feat. ghjeong[prompt], HyungdukSeo)\n\n' +
           '── 터미널 기본 ──\n' +
           'SSH/SFTP 원격 접속 (비밀번호/키/Expect-Send 로그인)\n' +
@@ -1536,13 +1648,21 @@ function App() {
           'MCP ssh_exec — Claude 가 원격 SSH 명령 실행 (cleartool 등)\n' +
           '모델 선택 (Opus / Sonnet / Haiku / Opus Plan)\n' +
           '권한 모드 (편집 전 확인 / 자동 수락 / 계획 / 모두 허용)\n' +
-          'Plan 모드 + ExitPlanMode 승인 모달 (마크다운 렌더)\n' +
+          'Plan 모드 + ExitPlanMode 승인 모달 (마크다운 + Mermaid 렌더)\n' +
           'PreToolUse hooks 기반 툴 단위 승인 (체크박스)\n' +
-          '대화 세션 이어가기 (--resume)\n' +
+          '대화 세션 이어가기 (--resume) + stale 세션 자동 폴백\n' +
           '로컬 파일/폴더 첨부 (📄+ / 📁+ webkitdirectory 재귀)\n' +
           '슬래시 명령 팔레트 (Context/Model/Permission/Slash, 필터 + ↑↓ 네비)\n' +
           '툴 타임라인 실시간 인디케이터 (⏳/✓/✕)\n' +
-          '채팅창 독립 폰트 설정 + Ctrl+Wheel 크기 조절\n\n' +
+          '채팅창 독립 폰트 설정 + Ctrl+Wheel 크기 조절\n' +
+          '대화 이력 관리 (Pinned/Recents, 이름 변경, 핀 고정, 삭제)\n' +
+          '대화 백그라운드 진행 — + 새 대화 시작해도 이전 대화 응답 계속 수신\n' +
+          '대화 포크 (메시지 우클릭 → 여기서 포크하기, 이전 컨텍스트 transcript 자동 inject)\n' +
+          '메시지 우클릭 메뉴 (텍스트/마크다운 복사, 컨텍스트 첨부, 포크)\n' +
+          'Mermaid 다이어그램 자동 SVG 렌더 + 우클릭 PNG/SVG 저장·복사\n' +
+          'GFM 테이블 자동 렌더 (탭 정렬 텍스트도 표로 자동 변환)\n' +
+          'AskUserQuestion / ToolSearch 도구 차단 (비대화형 모드 안정성)\n' +
+          'requestId 단위 프로세스 분리 — 다중 대화 동시 진행, 정확한 stop\n\n' +
           '── 입력/브로드캐스트 ──\n' +
           '텍스트 일괄 전송 (현재/보이는 탭/연결된 세션/전체 세션 lazy connect)\n' +
           '빠른 연결 바 (host/user/password/enc 즉석 접속)\n' +
@@ -1862,6 +1982,12 @@ function App() {
               };
               const onLeaveTree = () => {
                 if (remoteTreePinned) return;
+                if (remoteTreeHideTimer.current) clearTimeout(remoteTreeHideTimer.current);
+                remoteTreeHideTimer.current = setTimeout(() => setRemoteTreeVisible(false), 500);
+              };
+              const onLeaveTrigger = () => {
+                if (remoteTreePinned) return;
+                if (remoteTreeHideTimer.current) clearTimeout(remoteTreeHideTimer.current);
                 remoteTreeHideTimer.current = setTimeout(() => setRemoteTreeVisible(false), 500);
               };
               fileTreeNode = (
@@ -1869,10 +1995,9 @@ function App() {
                   {!remoteTreePinned && (
                     <div
                       className="workspace-file-tree-trigger"
-                      onMouseEnter={onEnterTrigger}
                       style={{ ['--file-tree-trigger-top' as any]: `${fileTreeTriggerTop}px` }}
                     >
-                      <div className="workspace-file-tree-trigger-top">
+                      <div className="workspace-file-tree-trigger-top" onMouseEnter={onEnterTrigger} onMouseLeave={onLeaveTrigger}>
                         <span className="workspace-file-tree-trigger-text">📁 파일 트리</span>
                       </div>
                       <div className="workspace-file-tree-trigger-bottom" />
@@ -1940,6 +2065,7 @@ function App() {
           <Layout root={activeTab.layout}
             selectedPanelId={selectedPanelId}
             onSplit={(nodeId, dir) => openSplitSessionPicker(dir, nodeId)}
+            onSplitWithPicker={(nodeId, dir) => openSplitSessionPickerWithPrompt(dir, nodeId)}
             onClose={nodeId => closePanel(activeTab.id, nodeId)}
             floatingPanelId={floatingPanelId}
             onToggleFloat={nodeId => {
@@ -2367,13 +2493,19 @@ function App() {
         };
         const onLeaveSidebar = () => {
           if (claudeChatPinned) return;
+          if (claudeChatHideTimer.current) clearTimeout(claudeChatHideTimer.current);
+          claudeChatHideTimer.current = setTimeout(() => setClaudeChatVisible(false), 500);
+        };
+        const onLeaveTrigger = () => {
+          if (claudeChatPinned) return;
+          if (claudeChatHideTimer.current) clearTimeout(claudeChatHideTimer.current);
           claudeChatHideTimer.current = setTimeout(() => setClaudeChatVisible(false), 500);
         };
         return (
           <>
             {!claudeChatPinned && (
               <div className="claude-chat-sidebar-trigger">
-                <div className="claude-chat-sidebar-trigger-top" onMouseEnter={onEnterTrigger}>
+                <div className="claude-chat-sidebar-trigger-top" onMouseEnter={onEnterTrigger} onMouseLeave={onLeaveTrigger}>
                   <span className="claude-chat-sidebar-trigger-text">🤖 Claude</span>
                 </div>
                 <div className="claude-chat-sidebar-trigger-bottom" />
@@ -2441,23 +2573,70 @@ function App() {
           )}
         </div>
       )}
-      {splitSessionPicker && (
-        <div className="folder-picker-backdrop" onClick={() => setSplitSessionPicker(null)}>
-          <div className="folder-picker" onClick={e => e.stopPropagation()}>
-            <div className="folder-picker-title">세션 선택 ({splitSessionPicker.dir === 'row' ? '세로 분할' : '가로 분할'})</div>
-            <div className="folder-picker-list">
-              {splitSessionPicker.sessions.map(s => (
-                <div key={s.sessionId} className="folder-picker-item" onClick={() => handleSplitSessionSelect(s)}>
-                  📡 {s.sessionName} <span style={{ color: '#777', fontSize: 11 }}>({s.host})</span>
-                </div>
-              ))}
-            </div>
-            <div className="folder-picker-actions">
-              <button onClick={() => setSplitSessionPicker(null)}>취소</button>
+      {splitSessionPicker && (() => {
+        const { folders, sessions } = splitSessionPicker;
+        const toggleFolder = (fid: string) => {
+          setSplitPickerCollapsed(prev => {
+            const next = new Set(prev);
+            if (next.has(fid)) next.delete(fid); else next.add(fid);
+            return next;
+          });
+        };
+        const renderTree = (parentId: string | undefined, depth: number): React.ReactNode[] => {
+          const rows: React.ReactNode[] = [];
+          const subFolders = folders.filter(f => (f.parentId ?? undefined) === (parentId ?? undefined));
+          for (const f of subFolders) {
+            const isCollapsed = splitPickerCollapsed.has(f.id);
+            rows.push(
+              <div
+                key={`f-${f.id}`}
+                data-fid={f.id}
+                className="folder-picker-item folder-row"
+                style={{ paddingLeft: 8 + depth * 16, cursor: 'pointer' }}
+                onClick={() => toggleFolder(f.id)}
+              >
+                <span style={{ width: 14, display: 'inline-block', fontSize: 10, color: '#888' }}>{isCollapsed ? '▶' : '▼'}</span>
+                📁 {f.name}
+              </div>
+            );
+            if (!isCollapsed) rows.push(...renderTree(f.id, depth + 1));
+          }
+          const sessionsInFolder = sessions.filter(s => (s.folderId ?? undefined) === (parentId ?? undefined));
+          for (const s of sessionsInFolder) {
+            rows.push(
+              <div
+                key={`s-${s.sessionId}`}
+                data-sid={s.sessionId}
+                className="folder-picker-item picker-session-row"
+                style={{ paddingLeft: 8 + depth * 16, position: 'relative' }}
+                onClick={() => handleSplitSessionSelect(s)}
+                title={s.host}
+              >
+                <span style={{ width: 14, display: 'inline-block' }} />
+                {s.icon || '📡'} {s.sessionName}
+                <span className="picker-session-host-tooltip">{s.host}</span>
+              </div>
+            );
+          }
+          return rows;
+        };
+        return (
+          <div className="folder-picker-backdrop" onClick={() => setSplitSessionPicker(null)}>
+            <div
+              className="folder-picker"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="folder-picker-title">세션 선택 ({splitSessionPicker.dir === 'row' ? '세로 분할' : '가로 분할'})</div>
+              <div className="folder-picker-list">
+                {renderTree(undefined, 0)}
+              </div>
+              <div className="folder-picker-actions">
+                <button onClick={() => setSplitSessionPicker(null)}>취소</button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {showManual && (
         <div className="session-editor-backdrop" onClick={() => setShowManual(false)}>

@@ -299,6 +299,7 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
         <div
           className={`remote-file-item ${node.isDir ? 'folder' : 'file'} ${isSelected ? 'selected' : ''}`}
           data-cat={cat}
+          data-path={node.path}
           style={{ paddingLeft: 8 + depth * 14 }}
           onClick={(e) => {
             if (node.isDir) {
@@ -417,7 +418,35 @@ export const RemoteFileTree: React.FC<Props> = ({ termId, sessionName, sessionId
           navigateTo(root.path);
         }} title="새로고침 (현재 경로 다시 로드)">⟳</button>
       </div>
-      <div className="remote-file-list">
+      <div
+        className="remote-file-list"
+        tabIndex={0}
+        onKeyDown={e => {
+          if (e.key.length !== 1 || e.ctrlKey || e.altKey || e.metaKey) return;
+          // 현재 펼쳐진 가시적 노드 flatten
+          const flat: TreeNode[] = [];
+          const walk = (n: TreeNode, depth: number) => {
+            if (depth > 0) flat.push(n);
+            if (n.isDir && !collapsed.has(n.path) && n.children) for (const c of n.children) walk(c, depth + 1);
+          };
+          if (root) walk(root, 0);
+          const ch = e.key.toLowerCase();
+          const curIdx = flat.findIndex(n => selectedPaths.has(n.path));
+          for (let i = 1; i <= flat.length; i++) {
+            const idx = (curIdx + i) % flat.length;
+            if (flat[idx].name.toLowerCase().startsWith(ch)) {
+              e.preventDefault();
+              setSelectedPaths(new Set([flat[idx].path]));
+              anchorPathRef.current = flat[idx].path;
+              setTimeout(() => {
+                const el = document.querySelector(`.remote-file-item[data-path="${CSS.escape(flat[idx].path)}"]`) as HTMLElement | null;
+                el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+              }, 0);
+              break;
+            }
+          }
+        }}
+      >
         {root.children && root.children.map(c => renderNode(c, 0))}
       </div>
       {ctxMenu && (() => {

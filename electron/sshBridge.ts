@@ -47,15 +47,30 @@ class SSHBridge extends EventEmitter {
     const conn = new Client();
     this.pendingConnects.set(panelId, conn);
 
+    // 연결 진행 상황을 터미널에 출력하는 헬퍼
+    const logLine = (color: string, msg: string) => {
+      this.emit('message', { type: 'data', panelId, data: `\r\n\x1b[${color}m${msg}\x1b[0m\r\n` });
+    };
+    const logInline = (color: string, msg: string) => {
+      this.emit('message', { type: 'data', panelId, data: `\x1b[${color}m${msg}\x1b[0m` });
+    };
+
+    logLine('96', `▶ ${session.host}:${session.port || 22} (${session.username}) 연결 중...`);
+
+    conn.on('handshake', () => logInline('90', '  [handshake OK] '));
+    conn.on('banner', () => logInline('90', '[banner] '));
+
     conn.on('ready', async () => {
       this.pendingConnects.delete(panelId);
+      logInline('92', '[SSH 연결 완료]\r\n');
       this.emit('message', { type: 'connected', panelId });
-      // 점프 호스트 설정이 있으면 primary 위에 터널 + 두번째 SSH 열고 그쪽에서 shell + SFTP
       const jumpHost = session.jumpTargetHost?.trim();
       if (jumpHost) {
+        logLine('96', `▶ 점프 호스트 ${jumpHost}:${session.jumpTargetPort || 22} (${session.jumpTargetUser || 'root'}) 연결 중...`);
         try {
           await this._setupJumpedSession(panelId, session, conn, cols, rows);
         } catch (err: any) {
+          logLine('91', `✕ 점프 호스트 연결 실패: ${err?.message || String(err)}`);
           this.emit('message', { type: 'error', panelId, error: `점프 호스트 연결 실패: ${err?.message || String(err)}` });
           try { conn.end(); } catch {}
         }
@@ -71,6 +86,7 @@ class SSHBridge extends EventEmitter {
       this.clients.delete(panelId);
       this.sftpCache.delete(panelId);
       this.scriptRunners.delete(panelId);
+      logLine('91', `✕ 연결 오류: ${err?.message || String(err)}`);
       this.emit('message', { type: 'error', panelId, error: String(err) });
     });
 

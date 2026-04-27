@@ -158,8 +158,8 @@ contextBridge.exposeInMainWorld('api', {
 
   // Claude Code CLI
   claudeCheck: () => ipcRenderer.invoke('claude:check'),
-  claudeSend: (sessionId: string, prompt: string, addDirs?: string[], disallowBash?: boolean, sshTermId?: string, resumeSessionId?: string | null, permissionMode?: string, model?: string, perToolApproval?: boolean) =>
-    ipcRenderer.invoke('claude:send', { sessionId, prompt, addDirs, disallowBash, sshTermId, resumeSessionId, permissionMode, model, perToolApproval }),
+  claudeSend: (sessionId: string, prompt: string, addDirs?: string[], disallowBash?: boolean, sshTermId?: string, resumeSessionId?: string | null, permissionMode?: string, model?: string, perToolApproval?: boolean, requestId?: string) =>
+    ipcRenderer.invoke('claude:send', { sessionId, prompt, addDirs, disallowBash, sshTermId, resumeSessionId, permissionMode, model, perToolApproval, requestId }),
   claudeHookRespond: (approvalId: string, decision: 'allow' | 'deny', reason?: string) =>
     ipcRenderer.invoke('claude:hook-respond', { approvalId, decision, reason }),
   onClaudeHookApprovalRequest: (cb: (p: any) => void) => {
@@ -173,7 +173,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.invoke('claude:unregister-mount', { panelId }),
   claudeGetMountPath: (panelId: string, remotePath: string) =>
     ipcRenderer.invoke('claude:get-mount-path', { panelId, remotePath }),
-  claudeStop: (sessionId: string) => ipcRenderer.invoke('claude:stop', { sessionId }),
+  claudeStop: (sessionId: string, requestId?: string) => ipcRenderer.invoke('claude:stop', { sessionId, requestId }),
+  clipboardWriteImage: (dataUrl: string) => ipcRenderer.invoke('clipboard:write-image', { dataUrl }),
   onClaudeStream: (cb: (p: any) => void) => {
     const handler = (_: any, p: any) => cb(p);
     ipcRenderer.on('claude:stream', handler);

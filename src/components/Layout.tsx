@@ -25,6 +25,7 @@ type CommonHandlers = {
   onAttachToClaude?: (termId: string, remotePath: string, fileName: string, isDir: boolean) => void;
   floatingPanelId?: string | null;
   onToggleFloat?: (nodeId: string) => void;
+  onSplitWithPicker?: (nodeId: string, dir: 'row' | 'column') => void;
 };
 
 type Props = CommonHandlers & { root: LayoutNode };
@@ -63,6 +64,7 @@ const NodeView: React.FC<NodeProps> = ({ node, ...h }) => {
             onOpenRemoteFile={h.onOpenRemoteFile} onAttachToClaude={h.onAttachToClaude}
             isFloating={isFloating} onToggleFloat={h.onToggleFloat}
             isSelected={h.selectedPanelId === node.id}
+            onSplitWithPicker={h.onSplitWithPicker}
           />
         </div>
       </div>

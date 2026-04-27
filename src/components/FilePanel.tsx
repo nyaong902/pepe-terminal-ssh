@@ -290,6 +290,27 @@ export const FilePanel: React.FC<Props> = ({ source, sources, onSourceChange, se
             const first = sorted.find(f => selectedFiles.has(f.name));
             if (first) { setRenamingFile(first.name); setRenameValue(first.name); }
           }
+          // prefix 키 점프 — 단일 키 누르면 해당 문자로 시작하는 첫 파일 선택, 같은 키 반복 시 순환
+          if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+            const sorted = getSortedFiles();
+            const ch = e.key.toLowerCase();
+            // 현재 선택된 파일 다음부터 찾기 (같은 키 반복 시 순환)
+            const curIdx = sorted.findIndex(f => selectedFiles.has(f.name));
+            let target = -1;
+            for (let i = 1; i <= sorted.length; i++) {
+              const idx = (curIdx + i) % sorted.length;
+              if (sorted[idx].name.toLowerCase().startsWith(ch)) { target = idx; break; }
+            }
+            if (target >= 0) {
+              e.preventDefault();
+              onSelectionChange(new Set([sorted[target].name]));
+              // 스크롤 위치 조정
+              setTimeout(() => {
+                const el = document.querySelector(`.fe-file-row[data-name="${CSS.escape(sorted[target].name)}"]`) as HTMLElement | null;
+                el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+              }, 0);
+            }
+          }
         }}
         onContextMenu={e => handleContextMenu(e)}
         onDragOver={e => { if (e.dataTransfer.types.includes('text/fe-files')) { e.preventDefault(); e.currentTarget.classList.add('fe-drop-target'); } }}

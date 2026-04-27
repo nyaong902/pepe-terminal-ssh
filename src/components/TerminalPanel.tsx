@@ -828,6 +828,9 @@ export function isTermPty(termId: string): boolean {
 
 // SSH 연결 시작 추적
 const sshConnecting = new Set<string>();
+export function isTermConnecting(termId: string): boolean {
+  return sshConnecting.has(termId);
+}
 // 사용자가 재연결을 명시적으로 취소한 termId (자동 재연결 방지)
 const reconnectUserCancelled = new Set<string>();
 
@@ -1075,12 +1078,13 @@ type Props = {
   isFloating?: boolean;
   onToggleFloat?: (nodeId: string) => void;
   isSelected?: boolean;
+  onSplitWithPicker?: (nodeId: string, dir: 'row' | 'column') => void;
 };
 
 export const TerminalPanel: React.FC<Props> = ({
   nodeId, panel, onSplit, onClose, onSelect, onSwitchSession, onCloseSession, onMoveSession, onSplitMoveSession, onReorderSession, onAddSession, onRenameSession, onConnectDrop, onDuplicateSession, availableShells,
   treeWidth = 240, onTreeWidthChange, onOpenRemoteFile, onAttachToClaude,
-  isFloating, onToggleFloat, isSelected: _isSelected,
+  isFloating, onToggleFloat, isSelected: _isSelected, onSplitWithPicker,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mountedTermRef = useRef<string | null>(null);
@@ -1455,6 +1459,7 @@ export const TerminalPanel: React.FC<Props> = ({
               <span
                 key={sess.termId}
                 className={`panel-session-tab ${idx === panel.activeIdx ? 'active' : ''}`}
+                title={sess.sessionName}
                 draggable
                 onDragStart={e => {
                   e.stopPropagation();
@@ -1497,7 +1502,10 @@ export const TerminalPanel: React.FC<Props> = ({
                     onClick={e => e.stopPropagation()}
                   />
                 ) : (
-                  <span className="panel-session-tab-name">{sess.sessionName}</span>
+                  <>
+                    <span className="panel-session-tab-name">{sess.sessionName}</span>
+                    <span className="panel-session-tab-tooltip">{sess.sessionName}</span>
+                  </>
                 )}
                 <span className="panel-session-tab-close" onClick={e => {
                   e.stopPropagation();
@@ -1553,16 +1561,32 @@ export const TerminalPanel: React.FC<Props> = ({
             />
           );
         })()}
-        <button className="panel-btn" onClick={() => onSplit(nodeId, 'row')} title="Split Horizontal">
+        <button className="panel-btn" onClick={() => onSplit(nodeId, 'row')} title="세로 분할 (빈 패널)">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
             <rect x="1" y="1" width="12" height="12" rx="1.5" /><line x1="7" y1="1" x2="7" y2="13" />
           </svg>
         </button>
-        <button className="panel-btn" onClick={() => onSplit(nodeId, 'column')} title="Split Vertical">
+        <button className="panel-btn" onClick={() => onSplit(nodeId, 'column')} title="가로 분할 (빈 패널)">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
             <rect x="1" y="1" width="12" height="12" rx="1.5" /><line x1="1" y1="7" x2="13" y2="7" />
           </svg>
         </button>
+        {onSplitWithPicker && (
+          <>
+            <button className="panel-btn" onClick={() => onSplitWithPicker(nodeId, 'row')} title="세션 선택해서 세로 분할">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <rect x="1" y="1" width="12" height="12" rx="1.5" /><line x1="7" y1="1" x2="7" y2="13" />
+                <circle cx="10" cy="10" r="2" fill="currentColor" stroke="none" />
+              </svg>
+            </button>
+            <button className="panel-btn" onClick={() => onSplitWithPicker(nodeId, 'column')} title="세션 선택해서 가로 분할">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <rect x="1" y="1" width="12" height="12" rx="1.5" /><line x1="1" y1="7" x2="13" y2="7" />
+                <circle cx="10" cy="10" r="2" fill="currentColor" stroke="none" />
+              </svg>
+            </button>
+          </>
+        )}
         <button
           className={`panel-btn ${isFloating ? 'panel-btn-active' : ''}`}
           onClick={() => onToggleFloat?.(nodeId)}

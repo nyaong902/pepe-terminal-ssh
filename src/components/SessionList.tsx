@@ -309,6 +309,7 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
             return (
               <React.Fragment key={f.id}>
                 <div
+                  data-folder-id={f.id}
                   className={`session-item folder-item ${isSelected || selectedIds.has(f.id) ? 'selected' : ''} ${dragOverId === f.id ? 'drag-over' : ''}`}
                   style={{ paddingLeft: 8 + depth * 16 }}
                   onClick={e => {
@@ -336,6 +337,7 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
           if (s) {
             return (
               <div key={s.id}
+                data-session-id={s.id}
                 className={`session-item ${(selectedId === s.id && selectedType === 'session') || selectedIds.has(s.id) ? 'selected' : ''}`}
                 style={{ paddingLeft: 8 + depth * 16 }}
                 onClick={e => {
@@ -372,7 +374,7 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
                   <input className="folder-rename-input" value={renameValue} onChange={e => setRenameValue(e.target.value)} onBlur={handleRenameSubmit} onKeyDown={e => { if (e.key === 'Enter') handleRenameSubmit(); if (e.key === 'Escape') setRenamingId(null); }} autoFocus onClick={e => e.stopPropagation()} />
                 ) : (
                   <div className="session-item-name" title={`${s.host}:${s.port}${s.username ? ' ('+s.username+')' : ''}`}>
-                    {s.icon && <span className="session-icon">{s.icon}</span>}{s.name}
+                    <span className="session-icon">{s.icon || '📡'}</span>{s.name}
                     <span className="session-item-host-tooltip">{s.host}:{s.port}</span>
                   </div>
                 )}
@@ -395,6 +397,7 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
 
   const handleMouseLeaveSidebar = () => {
     if (pinned) return;
+    if (hideTimer.current) clearTimeout(hideTimer.current);
     hideTimer.current = setTimeout(() => setVisible(false), 500);
   };
 
@@ -403,12 +406,18 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
   };
 
+  const handleMouseLeaveTrigger = () => {
+    if (pinned) return;
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => setVisible(false), 500);
+  };
+
   return (
     <div className="session-sidebar">
       {/* 자동숨기기 모드: 세로 탭 트리거 */}
       {!pinned && (
         <div className="session-sidebar-trigger">
-          <div className="session-sidebar-trigger-top" onMouseEnter={handleMouseEnterTrigger}>
+          <div className="session-sidebar-trigger-top" onMouseEnter={handleMouseEnterTrigger} onMouseLeave={handleMouseLeaveTrigger}>
             <span className="session-sidebar-trigger-text">📡 세션 관리</span>
           </div>
           <div className="session-sidebar-trigger-bottom" />
@@ -473,6 +482,37 @@ export const SessionList: React.FC<Props> = ({ onConnect, onMultiConnect, onDisc
               e.preventDefault();
               const s = sessions.find(x => x.id === selectedId);
               if (s) setCopiedSession(s);
+            }
+            // prefix 점프 — 파일 트리와 동일: startsWith, 가시 항목 순회, 같은 키 반복 시 순환
+            if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+              const items: { id: string; name: string; type: 'session' | 'folder' }[] = [];
+              const walk = (parentId?: string) => {
+                const fs = folders.filter(f => (f.parentId ?? undefined) === (parentId ?? undefined));
+                const ss = sessions.filter(s => (s.folderId ?? undefined) === (parentId ?? undefined));
+                for (const f of fs) {
+                  items.push({ id: f.id, name: f.name, type: 'folder' });
+                  if (!collapsed.has(f.id)) walk(f.id);
+                }
+                for (const s of ss) items.push({ id: s.id, name: s.name, type: 'session' });
+              };
+              walk(undefined);
+              const ch = e.key.toLowerCase();
+              const curIdx = items.findIndex(x => x.id === selectedId);
+              for (let i = 1; i <= items.length; i++) {
+                const idx = (curIdx + i) % items.length;
+                if (items[idx].name.toLowerCase().startsWith(ch)) {
+                  e.preventDefault();
+                  setSelectedId(items[idx].id);
+                  setSelectedType(items[idx].type);
+                  setSelectedIds(new Set());
+                  setTimeout(() => {
+                    const el = document.querySelector(`[data-session-id="${items[idx].id}"],[data-folder-id="${items[idx].id}"]`) as HTMLElement | null;
+                    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                  }, 0);
+                  break;
+                }
+              }
+              return;
             }
             // Ctrl+V: 세션 붙여넣기
             if ((e.ctrlKey || e.metaKey) && e.key === 'v' && copiedSession) {
