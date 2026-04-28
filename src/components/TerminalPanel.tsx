@@ -8,7 +8,7 @@ import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { SearchAddon } from 'xterm-addon-search';
 import { Unicode11Addon } from 'xterm-addon-unicode11';
-import { getThemeByName } from '../utils/terminalThemes';
+import { getThemeByName, terminalThemes } from '../utils/terminalThemes';
 import { getTerminalSettings } from '../utils/terminalSettings';
 import { matchKeybinding, isKeybindingListening } from '../utils/keybindings';
 import 'xterm/css/xterm.css';
@@ -501,9 +501,16 @@ export function isPtyResizeSuppressed() { return suppressPtyResize; }
 export function refitAllTerms() {
   for (const [tid, entry] of termStore) {
     try {
+      // 컨테이너가 숨겨져 있으면(0×0) refit 하지 않음 — vi 등 풀스크린 앱이 0 크기로 깨지는 문제 방지
+      const el = entry.term.element as HTMLElement | undefined;
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 4 || rect.height < 4) continue;
+      }
       entry.fit.fit();
       const newCols = (entry.term as any).cols;
       const newRows = (entry.term as any).rows;
+      if (!newCols || !newRows) continue;
       if (ptyConnected.has(tid)) {
         (window as any).api?.ptyResize?.(tid, newCols, newRows);
       } else {
@@ -828,6 +835,9 @@ export function isTermPty(termId: string): boolean {
 
 // SSH 연결 시작 추적
 const sshConnecting = new Set<string>();
+export function isTermConnecting(termId: string): boolean {
+  return sshConnecting.has(termId);
+}
 // 사용자가 재연결을 명시적으로 취소한 termId (자동 재연결 방지)
 const reconnectUserCancelled = new Set<string>();
 
@@ -1075,12 +1085,13 @@ type Props = {
   isFloating?: boolean;
   onToggleFloat?: (nodeId: string) => void;
   isSelected?: boolean;
+  onSplitWithPicker?: (nodeId: string, dir: 'row' | 'column') => void;
 };
 
 export const TerminalPanel: React.FC<Props> = ({
   nodeId, panel, onSplit, onClose, onSelect, onSwitchSession, onCloseSession, onMoveSession, onSplitMoveSession, onReorderSession, onAddSession, onRenameSession, onConnectDrop, onDuplicateSession, availableShells,
   treeWidth = 240, onTreeWidthChange, onOpenRemoteFile, onAttachToClaude,
-  isFloating, onToggleFloat, isSelected: _isSelected,
+  isFloating, onToggleFloat, isSelected: _isSelected, onSplitWithPicker,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mountedTermRef = useRef<string | null>(null);
@@ -1366,16 +1377,34 @@ export const TerminalPanel: React.FC<Props> = ({
     ro.observe(containerRef.current);
     window.addEventListener('resize', debouncedFit);
 
+    // 포커스 / mousedown 이벤트 시 즉시 사이즈 동기화 (debounce 회피)
+    // — vi 등 풀스크린 앱이 사용자가 명령 입력 직전에 정확한 PTY 사이즈를 받도록
+    const forceSyncNow = () => {
+      if (resizeTimer) { clearTimeout(resizeTimer); resizeTimer = null; }
+      doFit();
+    };
+    const el = containerRef.current;
+    el?.addEventListener('mousedown', forceSyncNow, true);
+    el?.addEventListener('focusin', forceSyncNow);
+
     const timers = [100, 300].map(ms => setTimeout(doFit, ms));
     setTimeout(() => { try { getOrCreateTerm(activeTermId).term.focus(); } catch {} }, 100);
 
-    return () => { ro.disconnect(); window.removeEventListener('resize', debouncedFit); timers.forEach(clearTimeout); if (resizeTimer) clearTimeout(resizeTimer); };
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', debouncedFit);
+      el?.removeEventListener('mousedown', forceSyncNow, true);
+      el?.removeEventListener('focusin', forceSyncNow);
+      timers.forEach(clearTimeout);
+      if (resizeTimer) clearTimeout(resizeTimer);
+    };
   }, [activeTermId]);
 
   const [dropZone, setDropZone] = useState<DropZone | null>(null);
   const [miniCtx, setMiniCtx] = useState<{ x: number; y: number; termId: string; name: string } | null>(null);
   const [termCtx, setTermCtx] = useState<{ x: number; y: number } | null>(null);
   const [encodingCtx, setEncodingCtx] = useState<{ x: number; y: number; current: string } | null>(null);
+  const [themePickerCtx, setThemePickerCtx] = useState<{ x: number; y: number; current: string } | null>(null);
   const [scrollbackDialog, setScrollbackDialog] = useState<{ value: string } | null>(null);
   const [multiPaste, setMultiPaste] = useState<{ termId: string; text: string } | null>(null);
   const [shellMenu, setShellMenu] = useState<{ x: number; y: number } | null>(null);
@@ -1383,6 +1412,8 @@ export const TerminalPanel: React.FC<Props> = ({
   const showMultiLinePasteDialog = (tid: string, text: string) => setMultiPaste({ termId: tid, text });
   const [renamingTermId, setRenamingTermId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  // 미니탭바 우측 패널 컨트롤(분할/플로팅/투명도) 표시 토글 — 기본 숨김
+  const [showPanelControls, setShowPanelControls] = useState(false);
 
   return (
     <div
@@ -1455,6 +1486,7 @@ export const TerminalPanel: React.FC<Props> = ({
               <span
                 key={sess.termId}
                 className={`panel-session-tab ${idx === panel.activeIdx ? 'active' : ''}`}
+                title={sess.sessionName}
                 draggable
                 onDragStart={e => {
                   e.stopPropagation();
@@ -1497,7 +1529,10 @@ export const TerminalPanel: React.FC<Props> = ({
                     onClick={e => e.stopPropagation()}
                   />
                 ) : (
-                  <span className="panel-session-tab-name">{sess.sessionName}</span>
+                  <>
+                    <span className="panel-session-tab-name">{sess.sessionName}</span>
+                    <span className="panel-session-tab-tooltip">{sess.sessionName}</span>
+                  </>
                 )}
                 <span className="panel-session-tab-close" onClick={e => {
                   e.stopPropagation();
@@ -1530,6 +1565,23 @@ export const TerminalPanel: React.FC<Props> = ({
           </span>
         )}
 
+        <div className="panel-controls-wrap">
+        <button
+          className={`panel-controls-toggle ${showPanelControls ? 'open' : ''}`}
+          onClick={e => { e.stopPropagation(); setShowPanelControls(v => !v); }}
+          title={showPanelControls ? '컨트롤 숨기기' : '패널 컨트롤'}
+        >
+          <svg className="panel-controls-toggle-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+            <line x1="2" y1="3.5" x2="12" y2="3.5" />
+            <circle cx="9" cy="3.5" r="1.5" fill="currentColor" stroke="none" />
+            <line x1="2" y1="7" x2="12" y2="7" />
+            <circle cx="5" cy="7" r="1.5" fill="currentColor" stroke="none" />
+            <line x1="2" y1="10.5" x2="12" y2="10.5" />
+            <circle cx="10" cy="10.5" r="1.5" fill="currentColor" stroke="none" />
+          </svg>
+        </button>
+        {showPanelControls && (
+          <div className="panel-controls-popup" onClick={e => e.stopPropagation()}>
         {(() => {
           const curPct = Math.round((termOpacity.get(activeTermId || nodeId) ?? 1.0) * 100);
           return (
@@ -1553,33 +1605,50 @@ export const TerminalPanel: React.FC<Props> = ({
             />
           );
         })()}
-        <button className="panel-btn" onClick={() => onSplit(nodeId, 'row')} title="Split Horizontal">
+        <button className="panel-btn" onClick={() => onSplit(nodeId, 'row')} title="세로 분할 (빈 패널)">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
             <rect x="1" y="1" width="12" height="12" rx="1.5" /><line x1="7" y1="1" x2="7" y2="13" />
           </svg>
         </button>
-        <button className="panel-btn" onClick={() => onSplit(nodeId, 'column')} title="Split Vertical">
+        <button className="panel-btn" onClick={() => onSplit(nodeId, 'column')} title="가로 분할 (빈 패널)">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
             <rect x="1" y="1" width="12" height="12" rx="1.5" /><line x1="1" y1="7" x2="13" y2="7" />
           </svg>
         </button>
+        {onSplitWithPicker && (
+          <>
+            <button className="panel-btn" onClick={() => onSplitWithPicker(nodeId, 'row')} title="세션 선택해서 세로 분할">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <rect x="1" y="1" width="12" height="12" rx="1.5" /><line x1="7" y1="1" x2="7" y2="13" />
+                <circle cx="10" cy="10" r="2" fill="currentColor" stroke="none" />
+              </svg>
+            </button>
+            <button className="panel-btn" onClick={() => onSplitWithPicker(nodeId, 'column')} title="세션 선택해서 가로 분할">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <rect x="1" y="1" width="12" height="12" rx="1.5" /><line x1="1" y1="7" x2="13" y2="7" />
+                <circle cx="10" cy="10" r="2" fill="currentColor" stroke="none" />
+              </svg>
+            </button>
+          </>
+        )}
         <button
           className={`panel-btn ${isFloating ? 'panel-btn-active' : ''}`}
           onClick={() => onToggleFloat?.(nodeId)}
           title={isFloating ? '원래 크기로' : '플로팅 확대 (모든 터미널 위에)'}
         >
           {isFloating ? (
-            // 원상복구 아이콘 — 작은 사각형이 큰 사각형에서 나오는 모양
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
               <rect x="1" y="4" width="9" height="9" rx="1" /><path d="M4 4V1h9v9h-3" />
             </svg>
           ) : (
-            // 확대 아이콘 — 가운데 네모 + 화살표 외곽
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
               <path d="M1 5V1h4 M13 5V1H9 M1 9v4h4 M13 9v4H9" />
             </svg>
           )}
         </button>
+          </div>
+        )}
+        </div>
         <button
           className="panel-btn panel-btn-close"
           onClick={() => {
@@ -1769,6 +1838,10 @@ export const TerminalPanel: React.FC<Props> = ({
               const curSize = entry ? (entry.term.options.fontSize || 14) : 14;
               setFontDialog({ termId: activeTermId, family: curFamily, size: curSize });
             }},
+            { label: '테마 변경...', onClick: () => {
+              const cur = termThemeCache.get(activeTermId) || '';
+              setThemePickerCtx({ x: termCtx.x, y: termCtx.y, current: cur });
+            }},
           ]}
         />
       )}
@@ -1782,6 +1855,18 @@ export const TerminalPanel: React.FC<Props> = ({
               try {
                 await (window as any).api?.setSSHEncoding?.(activeTermId, enc);
               } catch {}
+            },
+          }))}
+        />
+      )}
+      {themePickerCtx && activeTermId && (
+        <ContextMenu
+          x={themePickerCtx.x} y={themePickerCtx.y}
+          onClose={() => setThemePickerCtx(null)}
+          items={terminalThemes.map(t => ({
+            label: (themePickerCtx.current === t.name ? '● ' : '   ') + t.name,
+            onClick: () => {
+              applyThemeToTerm(activeTermId, t.name);
             },
           }))}
         />

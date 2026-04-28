@@ -1,5 +1,5 @@
 // electron/main.ts
-import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, nativeImage } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -249,6 +249,18 @@ ipcMain.handle('app:clear-startup-cwd', () => {
   startupCwd = null;
   // 임시 파일도 확실히 삭제
   try { fs.unlinkSync(path.join(require('os').tmpdir(), '.pepe-terminal-cwd')); } catch {}
+});
+
+// 클립보드에 이미지(PNG bytes) 쓰기 — renderer 의 navigator.clipboard.write 가 실패하는 환경 대비
+ipcMain.handle('clipboard:write-image', (_e, { dataUrl }: { dataUrl: string }) => {
+  try {
+    const img = nativeImage.createFromDataURL(dataUrl);
+    if (img.isEmpty()) return { success: false, error: 'empty image' };
+    clipboard.writeImage(img);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: String(err) };
+  }
 });
 
 // 탐색기 우클릭 컨텍스트 메뉴 등록/해제
@@ -1398,9 +1410,12 @@ ipcMain.handle('claude:get-mount-path', async (_e, { panelId, remotePath }: { pa
 });
 
 // claude CLI 실행 + 스트리밍 응답 (print 모드)
-ipcMain.handle('claude:send', async (_e, { sessionId, prompt, addDirs, disallowBash, sshTermId, resumeSessionId, permissionMode, model, perToolApproval }: { sessionId: string; prompt: string; addDirs?: string[]; disallowBash?: boolean; sshTermId?: string; resumeSessionId?: string | null; permissionMode?: string; model?: string; perToolApproval?: boolean }) => {
+ipcMain.handle('claude:send', async (_e, { sessionId, prompt, addDirs, disallowBash, sshTermId, resumeSessionId, permissionMode, model, perToolApproval, requestId }: { sessionId: string; prompt: string; addDirs?: string[]; disallowBash?: boolean; sshTermId?: string; resumeSessionId?: string | null; permissionMode?: string; model?: string; perToolApproval?: boolean; requestId?: string }) => {
   try {
     const { spawn } = require('child_process');
+    // requestId 가 있으면 그걸 프로세스 키로 사용 — 동일 sessionId 안에서 여러 대화가 동시에 진행될 수 있음.
+    // (이전 동작: sessionId 만 키 → 새 send 때마다 이전 프로세스 강제종료 → 백그라운드 대화 죽음)
+    const procKey = requestId || sessionId;
     const os = require('os');
     const path = require('path');
     const fs = require('fs');
@@ -1491,6 +1506,10 @@ ipcMain.handle('claude:send', async (_e, { sessionId, prompt, addDirs, disallowB
     const allowedFlag = disallowBash
       ? `--allowedTools "Read" "Edit" "Write" "Glob" "Grep" "LS" ${mcpToolAllow} "WebFetch" "WebSearch"`
       : '';
+    // 사용자 인터랙션 도구는 비대화형 모드에서 무용지물 (ToolSearch 로 동적 로드 시도까지 차단)
+    // SSH 컨텍스트면 Bash 도 명시적으로 차단 (allowedTools 만으론 일부 빌드에서 빠져나가는 케이스 방지)
+    const sshDisallow = disallowBash ? `"Bash"` : '';
+    const disallowedFlag = `--disallowedTools "AskUserQuestion" "ToolSearch" ${sshDisallow}`;
 
     // 이전 대화 세션 이어가기 (--resume <session_id>)
     const resumeFlag = resumeSessionId ? `--resume "${resumeSessionId}"` : '';
@@ -1536,13 +1555,16 @@ ipcMain.handle('claude:send', async (_e, { sessionId, prompt, addDirs, disallowB
     // shell 커맨드로 파이프 구성 (claude 는 PATHEXT 로 .cmd 자동 해석)
     // Windows: chcp 65001 로 UTF-8 코드페이지 전환 (한글 깨짐 방지)
     const shellCmd = isWin
-      ? `chcp 65001 >nul && type "${tmpFile}" | claude -p ${resumeFlag} ${modelFlag} ${permFlag} ${allowedFlag} ${settingsFlag} ${mcpConfigArg} ${addDirArgs} --output-format stream-json --verbose`
-      : `cat "${tmpFile}" | claude -p ${resumeFlag} ${modelFlag} ${permFlag} ${allowedFlag} ${settingsFlag} ${mcpConfigArg} ${addDirArgs} --output-format stream-json --verbose`;
+      ? `chcp 65001 >nul && type "${tmpFile}" | claude -p ${resumeFlag} ${modelFlag} ${permFlag} ${allowedFlag} ${disallowedFlag} ${settingsFlag} ${mcpConfigArg} ${addDirArgs} --output-format stream-json --verbose`
+      : `cat "${tmpFile}" | claude -p ${resumeFlag} ${modelFlag} ${permFlag} ${allowedFlag} ${disallowedFlag} ${settingsFlag} ${mcpConfigArg} ${addDirArgs} --output-format stream-json --verbose`;
     console.log('[claude] shell cmd:', shellCmd);
     console.log('[claude] PATH has npm:', augmentedPath.toLowerCase().includes('npm'));
 
-    const proc = spawn(shellCmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], env: spawnEnv });
-    claudeProcesses.set(sessionId, proc);
+    // claude 프로세스 cwd — Electron 앱 폴더가 기본인데 그러면 Claude 가 이 앱을 분석 대상으로 오해.
+    // 사용자 홈으로 시작 (사용자 의도 상 작업 대상은 --add-dir 또는 SSH mount 로 명시됨)
+    const claudeCwd = process.env.USERPROFILE || process.env.HOME || os.homedir();
+    const proc = spawn(shellCmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], env: spawnEnv, cwd: claudeCwd });
+    claudeProcesses.set(procKey, proc);
 
     // 임시 파일 정리 (프로세스 종료 후)
     const cleanupTmp = () => {
@@ -1563,26 +1585,26 @@ ipcMain.handle('claude:send', async (_e, { sessionId, prompt, addDirs, disallowB
         console.log('[claude] stdout line:', trimmed.slice(0, 200));
         try {
           const msg = JSON.parse(trimmed);
-          mainWindow?.webContents.send('claude:stream', { sessionId, message: msg });
+          mainWindow?.webContents.send('claude:stream', { sessionId, requestId, message: msg });
         } catch {
-          mainWindow?.webContents.send('claude:stream', { sessionId, message: { type: 'text', text: trimmed } });
+          mainWindow?.webContents.send('claude:stream', { sessionId, requestId, message: { type: 'text', text: trimmed } });
         }
       }
     });
     proc.stderr.on('data', (data: Buffer) => {
       const err = data.toString();
       console.log('[claude] stderr:', err);
-      mainWindow?.webContents.send('claude:stream', { sessionId, message: { type: 'error', text: err } });
+      mainWindow?.webContents.send('claude:stream', { sessionId, requestId, message: { type: 'error', text: err } });
     });
     proc.on('error', (err: any) => {
       console.log('[claude] spawn error:', err);
-      mainWindow?.webContents.send('claude:stream', { sessionId, message: { type: 'error', text: String(err) } });
+      mainWindow?.webContents.send('claude:stream', { sessionId, requestId, message: { type: 'error', text: String(err) } });
     });
     proc.on('close', (code: number) => {
       console.log('[claude] close, code:', code);
       cleanupTmp();
-      claudeProcesses.delete(sessionId);
-      mainWindow?.webContents.send('claude:stream', { sessionId, message: { type: 'done', code } });
+      claudeProcesses.delete(procKey);
+      mainWindow?.webContents.send('claude:stream', { sessionId, requestId, message: { type: 'done', code } });
     });
     return { success: true };
   } catch (err: any) {
@@ -1591,8 +1613,27 @@ ipcMain.handle('claude:send', async (_e, { sessionId, prompt, addDirs, disallowB
   }
 });
 
-ipcMain.handle('claude:stop', (_e, { sessionId }: { sessionId: string }) => {
-  const proc = claudeProcesses.get(sessionId);
-  if (proc) { try { proc.kill(); } catch {} claudeProcesses.delete(sessionId); }
+ipcMain.handle('claude:stop', (_e, { sessionId, requestId }: { sessionId: string; requestId?: string }) => {
+  const { spawn } = require('child_process');
+  // requestId 가 명시되면 해당 프로세스만 종료, 아니면 sessionId 키로 fallback (legacy)
+  const procKey = requestId || sessionId;
+  const proc = claudeProcesses.get(procKey);
+  if (proc) {
+    // shell 을 통해 spawn 했으므로 proc.kill() 만으로는 자식 claude 가 살아남는다.
+    // Windows: taskkill /T /F 로 프로세스 트리 전체 종료
+    // Unix: process group 시그널 (-pid) — 단 detached 가 아니어도 일반적으론 SIGTERM 전파됨, 강제는 SIGKILL
+    try {
+      if (process.platform === 'win32') {
+        const pid = proc.pid;
+        if (pid) {
+          spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+        }
+      } else {
+        try { process.kill(-proc.pid, 'SIGKILL'); } catch { try { proc.kill('SIGKILL'); } catch {} }
+      }
+    } catch {}
+    try { proc.kill('SIGKILL'); } catch {}
+    claudeProcesses.delete(procKey);
+  }
   return { success: true };
 });
