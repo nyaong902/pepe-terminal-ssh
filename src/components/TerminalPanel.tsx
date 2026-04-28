@@ -846,6 +846,29 @@ const reconnectState: Map<string, { timer: ReturnType<typeof setInterval> | null
 const termSessionMap: Map<string, { sessionId: string; sessionName: string; host: string; quickSession?: any }> = new Map();
 // termId → 마지막 사용 비밀번호 (메모리 only, 재연결용)
 const termPasswordCache: Map<string, string> = new Map();
+// termId → autoTrackPwd 런타임 상태 (세션 초기값으로 시작, 토글 가능)
+const termAutoTrackState: Map<string, boolean> = new Map();
+const autoTrackListeners: Set<(termId: string, v: boolean) => void> = new Set();
+export function getTermAutoTrack(termId: string): boolean {
+  return termAutoTrackState.get(termId) ?? false;
+}
+export function setTermAutoTrack(termId: string, v: boolean) {
+  termAutoTrackState.set(termId, v);
+  autoTrackListeners.forEach(fn => { try { fn(termId, v); } catch {} });
+}
+export function subscribeAutoTrack(fn: (termId: string, v: boolean) => void): () => void {
+  autoTrackListeners.add(fn);
+  return () => autoTrackListeners.delete(fn);
+}
+// main 에서 hook 설치/제거 알림 수신 → 상태 자동 동기화
+if (typeof window !== 'undefined') {
+  const api: any = (window as any).api;
+  if (api?.onSSHAutoTrack) {
+    api.onSSHAutoTrack((p: any) => {
+      if (p && p.panelId) setTermAutoTrack(p.panelId, !!p.enabled);
+    });
+  }
+}
 
 export function getTermSessionInfo(termId: string) {
   return termSessionMap.get(termId);
@@ -1414,6 +1437,15 @@ export const TerminalPanel: React.FC<Props> = ({
   const [renameValue, setRenameValue] = useState('');
   // 미니탭바 우측 패널 컨트롤(분할/플로팅/투명도) 표시 토글 — 기본 숨김
   const [showPanelControls, setShowPanelControls] = useState(false);
+  // 활성 미니탭의 PWD 자동추적 상태 (main 에서 hook 설치/제거 시 자동 갱신)
+  const [autoTrackOn, setAutoTrackOn] = useState<boolean>(getTermAutoTrack(activeTermId || ''));
+  useEffect(() => {
+    setAutoTrackOn(getTermAutoTrack(activeTermId || ''));
+    const unsub = subscribeAutoTrack((tid, v) => {
+      if (tid === activeTermId) setAutoTrackOn(v);
+    });
+    return unsub;
+  }, [activeTermId]);
 
   return (
     <div
@@ -1645,6 +1677,22 @@ export const TerminalPanel: React.FC<Props> = ({
               <path d="M1 5V1h4 M13 5V1H9 M1 9v4h4 M13 9v4H9" />
             </svg>
           )}
+        </button>
+        <button
+          className={`panel-btn ${autoTrackOn ? 'panel-btn-active' : ''}`}
+          onClick={async () => {
+            if (!activeTermId) return;
+            const newVal = !autoTrackOn;
+            setAutoTrackOn(newVal);
+            setTermAutoTrack(activeTermId, newVal);
+            try { await (window as any).api?.setSSHAutoTrack?.(activeTermId, newVal); } catch {}
+          }}
+          title={autoTrackOn ? 'PWD 자동추적 끄기 (cd 시 파일트리 동기화)' : 'PWD 자동추적 켜기 (cd 시 파일트리 동기화)'}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M2 4 L5 4 L7 2 L12 2 L12 12 L2 12 Z" />
+            {autoTrackOn && <circle cx="9" cy="8" r="1.6" fill="currentColor" stroke="none" />}
+          </svg>
         </button>
           </div>
         )}

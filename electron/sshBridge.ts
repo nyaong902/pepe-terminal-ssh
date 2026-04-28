@@ -14,11 +14,12 @@ interface ClientRecord {
 }
 
 interface BridgeMessage {
-  type: 'data' | 'connected' | 'closed' | 'error' | 'auth-prompt' | 'sftp-progress' | 'sftp-complete' | 'sftp-error';
+  type: 'data' | 'connected' | 'closed' | 'error' | 'auth-prompt' | 'sftp-progress' | 'sftp-complete' | 'sftp-error' | 'auto-track';
   panelId: string;
   data?: string;
   error?: string;
   prompts?: string[];
+  enabled?: boolean;
 }
 
 class SSHBridge extends EventEmitter {
@@ -363,11 +364,15 @@ class SSHBridge extends EventEmitter {
     return rec?.encoding || null;
   }
 
+  // 검출된 shell path 캐시 (런타임 토글 시 hook 재설치/제거용)
+  private detectedShells: Map<string, string> = new Map();
+
   // 셸 검출 결과로 적절한 OSC 7 hook 주입. 매 프롬프트마다 원격 쉘이 현재 디렉토리를
   // OSC 7 (file://host/path) 시퀀스로 보내게 함.
   private _installOsc7Hook(panelId: string, shellPath: string) {
     const rec = this.clients.get(panelId);
     if (!rec) return;
+    this.detectedShells.set(panelId, shellPath || '');
     const shell = (shellPath || '').toLowerCase();
     let cmd = '';
     // 명령 끝에 ; printf '\033[1A\033[2K\r' 로 주입 명령 echo 1줄 erase (MOTD 보존).
@@ -382,6 +387,42 @@ class SSHBridge extends EventEmitter {
       return;
     }
     try { rec.stream.write(cmd); } catch {}
+    this.emit('message', { type: 'auto-track', panelId, enabled: true });
+  }
+
+  // 런타임 PWD 자동추적 토글 — hook 설치/제거를 실행 중인 쉘에 직접 전송
+  setAutoTrack(panelId: string, enabled: boolean): { success: boolean; error?: string } {
+    const rec = this.clients.get(panelId);
+    if (!rec?.stream) return { success: false, error: 'not connected' };
+    const clearLine = `; printf '\\033[1A\\033[2K\\r'`;
+    if (enabled) {
+      const cached = this.detectedShells.get(panelId);
+      if (cached) {
+        // 이미 검출된 shell 정보 사용
+        this._installOsc7Hook(panelId, cached);
+      } else {
+        // 처음 — shell 검출 트리거 (OSC 9 응답 도착하면 자동 설치)
+        try {
+          const detect = ` printf '\\033]9;pepe-shell:%s\\033\\134\\033[1A\\033[2K\\r' "$SHELL"\n`;
+          rec.stream.write(detect);
+        } catch (e: any) { return { success: false, error: String(e) }; }
+      }
+    } else {
+      // 모든 종류의 hook 제거 명령 전송 (없는 hook 은 무해하게 무시됨)
+      const shell = (this.detectedShells.get(panelId) || '').toLowerCase();
+      let cmd = '';
+      if (shell.includes('zsh')) {
+        cmd = ` precmd_functions=("\${(@)precmd_functions:#precmd_pepe_osc7}"); unset -f precmd_pepe_osc7 2>/dev/null${clearLine}\n`;
+      } else if (shell.includes('tcsh') || shell.includes('csh')) {
+        cmd = ` unalias precmd${clearLine}\n`;
+      } else {
+        // bash/sh 또는 미검출
+        cmd = ` unset PROMPT_COMMAND${clearLine}\n`;
+      }
+      try { rec.stream.write(cmd); } catch (e: any) { return { success: false, error: String(e) }; }
+      this.emit('message', { type: 'auto-track', panelId, enabled: false });
+    }
+    return { success: true };
   }
 
   handleResize(panelId: string, cols: number, rows: number) {

@@ -184,6 +184,9 @@ app.whenReady().then(() => {
       case 'sftp-error':
         mainWindow.webContents.send('sftp:error', { panelId: msg.panelId, error: msg.error });
         break;
+      case 'auto-track':
+        mainWindow.webContents.send('ssh:auto-track', { panelId: msg.panelId, enabled: msg.enabled });
+        break;
     }
   });
 });
@@ -1199,6 +1202,10 @@ ipcMain.on('ssh:resize', (_e, { panelId, cols, rows }) => {
 
 ipcMain.handle('ssh:set-encoding', (_e, { panelId, encoding }) => {
   return getSSHBridge().setEncoding(panelId, encoding);
+});
+
+ipcMain.handle('ssh:set-auto-track', (_e, { panelId, enabled }: { panelId: string; enabled: boolean }) => {
+  return getSSHBridge().setAutoTrack(panelId, !!enabled);
 });
 
 ipcMain.handle('ssh:get-encoding', (_e, panelId: string) => {
