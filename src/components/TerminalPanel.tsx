@@ -501,9 +501,16 @@ export function isPtyResizeSuppressed() { return suppressPtyResize; }
 export function refitAllTerms() {
   for (const [tid, entry] of termStore) {
     try {
+      // 컨테이너가 숨겨져 있으면(0×0) refit 하지 않음 — vi 등 풀스크린 앱이 0 크기로 깨지는 문제 방지
+      const el = entry.term.element as HTMLElement | undefined;
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 4 || rect.height < 4) continue;
+      }
       entry.fit.fit();
       const newCols = (entry.term as any).cols;
       const newRows = (entry.term as any).rows;
+      if (!newCols || !newRows) continue;
       if (ptyConnected.has(tid)) {
         (window as any).api?.ptyResize?.(tid, newCols, newRows);
       } else {
