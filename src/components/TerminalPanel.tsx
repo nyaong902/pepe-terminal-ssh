@@ -8,7 +8,7 @@ import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { SearchAddon } from 'xterm-addon-search';
 import { Unicode11Addon } from 'xterm-addon-unicode11';
-import { getThemeByName } from '../utils/terminalThemes';
+import { getThemeByName, terminalThemes } from '../utils/terminalThemes';
 import { getTerminalSettings } from '../utils/terminalSettings';
 import { matchKeybinding, isKeybindingListening } from '../utils/keybindings';
 import 'xterm/css/xterm.css';
@@ -1380,6 +1380,7 @@ export const TerminalPanel: React.FC<Props> = ({
   const [miniCtx, setMiniCtx] = useState<{ x: number; y: number; termId: string; name: string } | null>(null);
   const [termCtx, setTermCtx] = useState<{ x: number; y: number } | null>(null);
   const [encodingCtx, setEncodingCtx] = useState<{ x: number; y: number; current: string } | null>(null);
+  const [themePickerCtx, setThemePickerCtx] = useState<{ x: number; y: number; current: string } | null>(null);
   const [scrollbackDialog, setScrollbackDialog] = useState<{ value: string } | null>(null);
   const [multiPaste, setMultiPaste] = useState<{ termId: string; text: string } | null>(null);
   const [shellMenu, setShellMenu] = useState<{ x: number; y: number } | null>(null);
@@ -1387,6 +1388,8 @@ export const TerminalPanel: React.FC<Props> = ({
   const showMultiLinePasteDialog = (tid: string, text: string) => setMultiPaste({ termId: tid, text });
   const [renamingTermId, setRenamingTermId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  // 미니탭바 우측 패널 컨트롤(분할/플로팅/투명도) 표시 토글 — 기본 숨김
+  const [showPanelControls, setShowPanelControls] = useState(false);
 
   return (
     <div
@@ -1538,6 +1541,23 @@ export const TerminalPanel: React.FC<Props> = ({
           </span>
         )}
 
+        <div className="panel-controls-wrap">
+        <button
+          className={`panel-controls-toggle ${showPanelControls ? 'open' : ''}`}
+          onClick={e => { e.stopPropagation(); setShowPanelControls(v => !v); }}
+          title={showPanelControls ? '컨트롤 숨기기' : '패널 컨트롤'}
+        >
+          <svg className="panel-controls-toggle-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+            <line x1="2" y1="3.5" x2="12" y2="3.5" />
+            <circle cx="9" cy="3.5" r="1.5" fill="currentColor" stroke="none" />
+            <line x1="2" y1="7" x2="12" y2="7" />
+            <circle cx="5" cy="7" r="1.5" fill="currentColor" stroke="none" />
+            <line x1="2" y1="10.5" x2="12" y2="10.5" />
+            <circle cx="10" cy="10.5" r="1.5" fill="currentColor" stroke="none" />
+          </svg>
+        </button>
+        {showPanelControls && (
+          <div className="panel-controls-popup" onClick={e => e.stopPropagation()}>
         {(() => {
           const curPct = Math.round((termOpacity.get(activeTermId || nodeId) ?? 1.0) * 100);
           return (
@@ -1593,17 +1613,18 @@ export const TerminalPanel: React.FC<Props> = ({
           title={isFloating ? '원래 크기로' : '플로팅 확대 (모든 터미널 위에)'}
         >
           {isFloating ? (
-            // 원상복구 아이콘 — 작은 사각형이 큰 사각형에서 나오는 모양
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
               <rect x="1" y="4" width="9" height="9" rx="1" /><path d="M4 4V1h9v9h-3" />
             </svg>
           ) : (
-            // 확대 아이콘 — 가운데 네모 + 화살표 외곽
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
               <path d="M1 5V1h4 M13 5V1H9 M1 9v4h4 M13 9v4H9" />
             </svg>
           )}
         </button>
+          </div>
+        )}
+        </div>
         <button
           className="panel-btn panel-btn-close"
           onClick={() => {
@@ -1793,6 +1814,10 @@ export const TerminalPanel: React.FC<Props> = ({
               const curSize = entry ? (entry.term.options.fontSize || 14) : 14;
               setFontDialog({ termId: activeTermId, family: curFamily, size: curSize });
             }},
+            { label: '테마 변경...', onClick: () => {
+              const cur = termThemeCache.get(activeTermId) || '';
+              setThemePickerCtx({ x: termCtx.x, y: termCtx.y, current: cur });
+            }},
           ]}
         />
       )}
@@ -1806,6 +1831,18 @@ export const TerminalPanel: React.FC<Props> = ({
               try {
                 await (window as any).api?.setSSHEncoding?.(activeTermId, enc);
               } catch {}
+            },
+          }))}
+        />
+      )}
+      {themePickerCtx && activeTermId && (
+        <ContextMenu
+          x={themePickerCtx.x} y={themePickerCtx.y}
+          onClose={() => setThemePickerCtx(null)}
+          items={terminalThemes.map(t => ({
+            label: (themePickerCtx.current === t.name ? '● ' : '   ') + t.name,
+            onClick: () => {
+              applyThemeToTerm(activeTermId, t.name);
             },
           }))}
         />

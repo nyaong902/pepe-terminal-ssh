@@ -11,6 +11,7 @@ type Props = {
   onAddTab: (shellName?: string, shellPath?: string) => void;
   onCloseTab: (id: string) => void;
   onRenameTab?: (id: string, name: string) => void;
+  onReorderTabs?: (fromId: string, toId: string) => void;
   hasSession?: Record<string, boolean>;
   themeName?: string;
   themeList?: string[];
@@ -18,11 +19,13 @@ type Props = {
   availableShells?: ShellInfo[];
 };
 
-export const TabBar: React.FC<Props> = ({ tabs, activeTabId, onChange, onAddTab, onCloseTab, onRenameTab, hasSession, themeName, themeList, onThemeChange, availableShells }) => {
+export const TabBar: React.FC<Props> = ({ tabs, activeTabId, onChange, onAddTab, onCloseTab, onRenameTab, onReorderTabs, hasSession, themeName, themeList, onThemeChange, availableShells }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
   const [shellMenu, setShellMenu] = useState<{ x: number; y: number } | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
 
   const startRename = (tabId: string) => {
     const tab = tabs.find(t => t.id === tabId);
@@ -43,7 +46,27 @@ export const TabBar: React.FC<Props> = ({ tabs, activeTabId, onChange, onAddTab,
       {tabs.map(tab => (
         <div
           key={tab.id}
-          className={`tab-item ${tab.id === activeTabId ? 'active' : ''}`}
+          className={`tab-item ${tab.id === activeTabId ? 'active' : ''}${draggingId === tab.id ? ' dragging' : ''}${dragOverId === tab.id && draggingId && draggingId !== tab.id ? ' drag-over' : ''}`}
+          draggable={renamingId !== tab.id}
+          onDragStart={e => {
+            setDraggingId(tab.id);
+            e.dataTransfer.effectAllowed = 'move';
+            try { e.dataTransfer.setData('application/x-pepe-tab', tab.id); } catch {}
+          }}
+          onDragEnd={() => { setDraggingId(null); setDragOverId(null); }}
+          onDragOver={e => {
+            if (!draggingId || draggingId === tab.id) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            if (dragOverId !== tab.id) setDragOverId(tab.id);
+          }}
+          onDragLeave={() => { if (dragOverId === tab.id) setDragOverId(null); }}
+          onDrop={e => {
+            e.preventDefault();
+            if (draggingId && draggingId !== tab.id) onReorderTabs?.(draggingId, tab.id);
+            setDraggingId(null);
+            setDragOverId(null);
+          }}
           onClick={() => onChange(tab.id)}
           onAuxClick={e => { if (e.button === 1) { e.preventDefault(); onCloseTab(tab.id); } }}
           onContextMenu={e => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, tabId: tab.id }); }}

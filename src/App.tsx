@@ -1877,6 +1877,17 @@ function App() {
         <div className="tab-bar-row">
           <MenuBar menus={menuDefs} />
           <TabBar tabs={tabs} activeTabId={activeTabId} onChange={setActiveTabId} onAddTab={addTab} onCloseTab={closeTab} onRenameTab={renameTab}
+          onReorderTabs={(fromId, toId) => {
+            setTabs(prev => {
+              const from = prev.findIndex(t => t.id === fromId);
+              const to = prev.findIndex(t => t.id === toId);
+              if (from < 0 || to < 0 || from === to) return prev;
+              const next = prev.slice();
+              const [moved] = next.splice(from, 1);
+              next.splice(to, 0, moved);
+              return next;
+            });
+          }}
           hasSession={tabs.reduce((acc, t) => { acc[t.id] = collectAllSessions(t.layout).length > 0; return acc; }, {} as Record<string, boolean>)}
           availableShells={availableShells}
         />
