@@ -12,7 +12,7 @@ import { ClaudeChat } from './components/ClaudeChat';
 import { RemoteFileTree } from './components/RemoteFileTree';
 import { QuickConnectBar, QuickConnectResult } from './components/QuickConnectDialog';
 import { StatusBar } from './components/StatusBar';
-import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermConnecting, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect, toggleTreeVisibleForTerm, startInitialConnectWatchdog, getCurrentPwdForTerm } from './components/TerminalPanel';
+import { resetTermConnectState, clearScrollbackInTerm, clearScreenInTerm, clearAllInTerm, applyThemeToAll, applyThemeToTerm, applyFontToTerm, applyFontToAll, getCurrentThemeName, registerTermSession, getTermSessionInfo, getWordSeparator, setWordSeparator, refitAllTerms, applyScrollbackToAll, applyScrollbackToTerm, cloneTermStyle, isTermConnected, isTermConnecting, isTermPty, subscribeConnectedChange, focusTerm, pasteToTerm, promptPasswordAndConnect, startInitialConnectWatchdog, getCurrentPwdForTerm } from './components/TerminalPanel';
 import { marked } from 'marked';
 // @ts-ignore — vite ?raw 로 docs/MANUAL.md 를 번들 문자열로 임베드
 import manualMd from '../docs/MANUAL.md?raw';
@@ -255,6 +255,14 @@ function App() {
   const [remotePickerLoading, setRemotePickerLoading] = useState(false);
   const [remotePickerConnecting, setRemotePickerConnecting] = useState(false);
   const [showManual, setShowManual] = useState(false);
+  // 도움말/정보 등 단순 텍스트 모달 (alert 대체 — 스크롤 가능 + 닫을 때 터미널 포커스 복원)
+  const [infoModal, setInfoModal] = useState<{ title: string; text: string } | null>(null);
+  // 활성 터미널로 포커스 복원 (모달 닫기 / 빠른연결 닫기 / 외부 영역 클릭 후 등)
+  // activeTab/selectedPanelId 는 ref 로 읽음 (선언 순서 의존 회피)
+  const restoreTermFocusRef = useRef<() => void>(() => {});
+  const restoreTerminalFocus = useCallback(() => {
+    restoreTermFocusRef.current();
+  }, []);
   const manualHtml = useMemo(() => {
     try { return marked.parse(manualMd) as string; } catch { return '<pre>매뉴얼 로드 실패</pre>'; }
   }, []);
@@ -534,21 +542,32 @@ function App() {
     setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; setTimeout(() => el.remove(), 300); }, duration);
   }, []);
 
+  // fs-visible class 는 Layout 컴포넌트가 fullscreenTermId prop 으로 직접 className 에 포함시킴
+  // (이전엔 querySelector + classList 조작 → React 의 rerender 가 className 을 통째로 교체할 때 fs-visible 이 사라지는 버그 있었음)
+
+  // 윈도우 포커스 복귀 시 터미널 자동 포커스 (alt-tab 등으로 돌아올 때)
   useEffect(() => {
-    // DOM 이 아직 업데이트 안 됐을 수 있으므로 다음 프레임에 실행.
-    // 분할 / 창 크기 조정 / 미니탭 전환 등으로 레이아웃이 바뀌어도 재적용.
-    const apply = () => {
-      document.querySelectorAll('.layout-leaf.fs-visible').forEach(el => el.classList.remove('fs-visible'));
-      if (fullscreenTermId) {
-        const target = document.querySelector(`.layout-leaf[data-active-term="${fullscreenTermId}"]`);
-        if (target) target.classList.add('fs-visible');
-      }
+    const onWinFocus = () => {
+      // 활성 요소가 input/textarea/contenteditable 이면 그쪽 포커스 유지
+      const ae = document.activeElement as HTMLElement | null;
+      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return;
+      restoreTerminalFocus();
     };
-    apply();
-    const t1 = requestAnimationFrame(apply);
-    const t2 = setTimeout(apply, 100);
-    return () => { cancelAnimationFrame(t1); clearTimeout(t2); };
-  }, [fullscreenTermId, activeTabId, tabs]);
+    window.addEventListener('focus', onWinFocus);
+    return () => window.removeEventListener('focus', onWinFocus);
+  }, [restoreTerminalFocus]);
+
+  // 모달/오버레이 상태가 모두 닫힐 때 자동으로 터미널 포커스 복원.
+  // 닫힘 트랜지션 검출용으로 이전 상태를 ref 에 저장.
+  const overlayOpenRef = useRef(false);
+  useEffect(() => {
+    const anyOpen = !!(showOptions || showManual || infoModal || showQuickConnect || showBroadcast);
+    if (overlayOpenRef.current && !anyOpen) {
+      // 직전엔 오버레이가 열려있었고, 지금은 다 닫힘 → 터미널 포커스 복원
+      restoreTerminalFocus();
+    }
+    overlayOpenRef.current = anyOpen;
+  }, [showOptions, showManual, infoModal, showQuickConnect, showBroadcast, restoreTerminalFocus]);
 
   // 워크스페이스 전환 시 전체화면이면 새 워크스페이스의 선택된/첫번째 연결 패널로 fs-visible 전환
   useEffect(() => {
@@ -665,6 +684,31 @@ function App() {
   };
 
   const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0];
+  // 실제 포커스 복원 구현 — activeTab/selectedPanelId 가 선언된 후 ref 에 주입
+  restoreTermFocusRef.current = () => {
+    setTimeout(() => {
+      try {
+        if (!activeTab) return;
+        const sessions = collectAllSessions(activeTab.layout);
+        if (sessions.length === 0) return;
+        let targetTermId: string | null = null;
+        // 1) 선택된 (.selected) 패널의 active term
+        const selInner = document.querySelector('.layout-leaf-inner.selected') as HTMLElement | null;
+        const selLeaf = selInner?.parentElement as HTMLElement | null;
+        const selTerm = selLeaf?.getAttribute('data-active-term');
+        if (selTerm) targetTermId = selTerm;
+        // 2) fullscreen 모드의 fs-visible
+        if (!targetTermId) {
+          const fsLeaf = document.querySelector('.layout-leaf.fs-visible') as HTMLElement | null;
+          const t = fsLeaf?.getAttribute('data-active-term');
+          if (t) targetTermId = t;
+        }
+        // 3) 첫 활성 term
+        if (!targetTermId) targetTermId = sessions[0].termId;
+        if (targetTermId) focusTerm(targetTermId);
+      } catch {}
+    }, 50);
+  };
 
   // 활성 터미널 termId를 가져오는 헬퍼
   const getActiveTermId = useCallback((): string | null => {
@@ -824,14 +868,18 @@ function App() {
       if (matchKeybinding(e, 'find')) { e.preventDefault(); setShowSearch(prev => !prev); return; }
       if (matchKeybinding(e, 'toggleFileTree')) {
         e.preventDefault();
-        const tid = getActiveTermId();
-        if (tid) {
-          toggleTreeVisibleForTerm(tid);
-          [50, 200].forEach(ms => setTimeout(() => {
-            window.dispatchEvent(new Event('resize'));
-            refitAllTerms();
-          }, ms));
-        }
+        // 워크스페이스 공유 파일 트리 핀/언핀 토글
+        setRemoteTreePinned(p => {
+          const newVal = !p;
+          try { (window as any).api?.setUIPrefs?.({ remoteTreePinned: newVal }); } catch {}
+          // 언핀 시 즉시 숨김 (마우스 hover 안 해도 retract). 핀 시엔 visible 자동 true.
+          if (!newVal) setRemoteTreeVisible(false);
+          return newVal;
+        });
+        [50, 200].forEach(ms => setTimeout(() => {
+          window.dispatchEvent(new Event('resize'));
+          refitAllTerms();
+        }, ms));
         return;
       }
       const termId = getActiveTermId();
@@ -1551,7 +1599,7 @@ function App() {
         { label: '단축키 목록', action: () => {
           const kb = getKeybindings();
           const lines = Object.keys(KEYBINDING_LABELS).map(id => `${kb[id] || '(없음)'} — ${KEYBINDING_LABELS[id]}`);
-          alert(
+          setInfoModal({ title: '⌨ 단축키 목록', text: (
             '── 사용자 지정 단축키 ──\n' +
             lines.join('\n') +
             '\n\n── 고정 단축키 ──\n' +
@@ -1594,15 +1642,15 @@ function App() {
             '── 빠른 연결 바 ──\n' +
             'Enter — 연결\n' +
             'Esc — 무시 (닫기는 ✕ 버튼으로만)'
-          );
+          ) });
         }},
         { separator: true, label: '' },
         { label: 'PePe Terminal(SSH) 정보', action: async () => {
           let sessPath = '';
           try { sessPath = await (window as any).api.getSessionsPath(); } catch {}
-          alert(
-          'PePe Terminal(SSH) v2.0.5\n\n' +
-          '만든이: Claude (feat. ghjeong[prompt], HyungdukSeo)\n\n' +
+          setInfoModal({ title: 'ℹ PePe Terminal(SSH) 정보', text: (
+          'PePe Terminal(SSH) v2.0.6\n\n' +
+          '만든이: Claude (feat. ghjeong[prompt])\n\n' +
           '── 터미널 기본 ──\n' +
           'SSH/SFTP 원격 접속 (비밀번호/키/Expect-Send 로그인)\n' +
           'ProxyJump — primary 호스트 경유 점프 타겟 SSH+SFTP 직결\n' +
@@ -1663,6 +1711,21 @@ function App() {
           'GFM 테이블 자동 렌더 (탭 정렬 텍스트도 표로 자동 변환)\n' +
           'AskUserQuestion / ToolSearch 도구 차단 (비대화형 모드 안정성)\n' +
           'requestId 단위 프로세스 분리 — 다중 대화 동시 진행, 정확한 stop\n\n' +
+          '── v2.0.6 신규 ──\n' +
+          'PWD 자동추적 백그라운드 폴링 — 셸 history 0건 (별도 SSH exec 채널로 /proc/PID/cwd 폴링)\n' +
+          '세션관리/파일트리/Claude 사이드바 트리거 둥근 모서리\n' +
+          '워크스페이스 탭 드래그로 순서 변경\n' +
+          '미니탭바 우측 컨트롤 토글 (⋯ 버튼) — 분할/플로팅/투명도 플로팅 팝업\n' +
+          '터미널 우클릭 메뉴에 테마 변경 추가 (per-term)\n' +
+          'Mermaid 다이어그램 PNG/SVG 저장·복사 + 우클릭 메뉴\n' +
+          'Plan 승인 모달도 Mermaid 자동 렌더\n' +
+          'GFM 테이블 + 탭 정렬 텍스트 자동 변환\n' +
+          '일괄전송바·파일전송 세션 드롭다운: 🟢 연결됨 / ⚪ 연결안됨 그룹화\n' +
+          '타이틀바 단순 클릭으로 최대화 창 복원되던 문제 수정 (5px 드래그 임계값)\n' +
+          '터미널 vi 등 풀스크린 앱 사이즈 즉시 동기화 — refit 시 숨겨진 터미널 스킵\n' +
+          'Alt+Enter 최대화 + 미니탭 플로팅 토글 시 화면 사라지는 문제 수정\n' +
+          '도움말/정보 모달 스크롤 가능, 닫을 때 자동 터미널 포커스 복원\n' +
+          '윈도우 포커스 복귀 시 자동 터미널 포커스 (Alt+Tab 등)\n\n' +
           '── 입력/브로드캐스트 ──\n' +
           '텍스트 일괄 전송 (현재/보이는 탭/연결된 세션/전체 세션 lazy connect)\n' +
           '빠른 연결 바 (host/user/password/enc 즉석 접속)\n' +
@@ -1691,7 +1754,7 @@ function App() {
           'Claude Code CLI (@anthropic-ai/claude-code)\n\n' +
           '── 세션 저장 경로 ──\n' +
           (sessPath || '(알 수 없음)')
-        ); } },
+        ) }); } },
       ],
     },
   ];
@@ -2089,6 +2152,7 @@ function App() {
             onSplitWithPicker={(nodeId, dir) => openSplitSessionPickerWithPrompt(dir, nodeId)}
             onClose={nodeId => closePanel(activeTab.id, nodeId)}
             floatingPanelId={floatingPanelId}
+            fullscreenTermId={fullscreenTermId}
             onToggleFloat={nodeId => {
               setFloatingPanelId(prev => prev === nodeId ? null : nodeId);
               setTimeout(() => { window.dispatchEvent(new Event('resize')); refitAllTerms(); }, 120);
@@ -2654,6 +2718,31 @@ function App() {
               <div className="folder-picker-actions">
                 <button onClick={() => setSplitSessionPicker(null)}>취소</button>
               </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {infoModal && (() => {
+        const closeAndFocus = () => {
+          setInfoModal(null);
+          restoreTerminalFocus();
+        };
+        return (
+          <div className="session-editor-backdrop" onClick={closeAndFocus}>
+            <div className="session-editor" onClick={e => e.stopPropagation()}
+              style={{ width: '70vw', maxWidth: 700, height: '70vh', display: 'flex', flexDirection: 'column' }}
+              onKeyDown={e => { if (e.key === 'Escape') closeAndFocus(); }}
+              tabIndex={-1}
+              ref={el => { if (el) setTimeout(() => el.focus(), 0); }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 4px 8px', borderBottom: '1px solid #333' }}>
+                <h3 style={{ margin: 0 }}>{infoModal.title}</h3>
+                <button onClick={closeAndFocus} title="닫기 (Esc)">✕</button>
+              </div>
+              <pre style={{ flex: 1, overflow: 'auto', margin: 0, padding: '12px 16px', fontFamily: 'inherit', fontSize: 12, lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#ddd' }}>
+                {infoModal.text}
+              </pre>
             </div>
           </div>
         );
