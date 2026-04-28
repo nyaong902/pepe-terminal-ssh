@@ -1377,10 +1377,27 @@ export const TerminalPanel: React.FC<Props> = ({
     ro.observe(containerRef.current);
     window.addEventListener('resize', debouncedFit);
 
+    // 포커스 / mousedown 이벤트 시 즉시 사이즈 동기화 (debounce 회피)
+    // — vi 등 풀스크린 앱이 사용자가 명령 입력 직전에 정확한 PTY 사이즈를 받도록
+    const forceSyncNow = () => {
+      if (resizeTimer) { clearTimeout(resizeTimer); resizeTimer = null; }
+      doFit();
+    };
+    const el = containerRef.current;
+    el?.addEventListener('mousedown', forceSyncNow, true);
+    el?.addEventListener('focusin', forceSyncNow);
+
     const timers = [100, 300].map(ms => setTimeout(doFit, ms));
     setTimeout(() => { try { getOrCreateTerm(activeTermId).term.focus(); } catch {} }, 100);
 
-    return () => { ro.disconnect(); window.removeEventListener('resize', debouncedFit); timers.forEach(clearTimeout); if (resizeTimer) clearTimeout(resizeTimer); };
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', debouncedFit);
+      el?.removeEventListener('mousedown', forceSyncNow, true);
+      el?.removeEventListener('focusin', forceSyncNow);
+      timers.forEach(clearTimeout);
+      if (resizeTimer) clearTimeout(resizeTimer);
+    };
   }, [activeTermId]);
 
   const [dropZone, setDropZone] = useState<DropZone | null>(null);
