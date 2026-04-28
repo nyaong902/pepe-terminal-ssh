@@ -24,6 +24,7 @@ type CommonHandlers = {
   onOpenRemoteFile?: (termId: string, remotePath: string, fileName: string) => void;
   onAttachToClaude?: (termId: string, remotePath: string, fileName: string, isDir: boolean) => void;
   floatingPanelId?: string | null;
+  fullscreenTermId?: string | null;
   onToggleFloat?: (nodeId: string) => void;
   onSplitWithPicker?: (nodeId: string, dir: 'row' | 'column') => void;
 };
@@ -47,8 +48,9 @@ const NodeView: React.FC<NodeProps> = ({ node, ...h }) => {
     };
     const activeTermId = node.panel.sessions[node.panel.activeIdx]?.termId || '';
     const isFloating = h.floatingPanelId === node.id;
+    const isFsVisible = !!(h.fullscreenTermId && h.fullscreenTermId === activeTermId);
     return (
-      <div className={`layout-leaf ${isFloating ? 'floating' : ''}`} data-active-term={activeTermId}>
+      <div className={`layout-leaf ${isFloating ? 'floating' : ''} ${isFsVisible ? 'fs-visible' : ''}`} data-active-term={activeTermId}>
         <div className={`layout-leaf-inner ${h.selectedPanelId === node.id ? 'selected' : ''}`}
           onDragOver={e => e.preventDefault()} onDrop={handleDrop}
         >

@@ -98,6 +98,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.invoke('ssh:set-encoding', { panelId, encoding }),
   getSSHEncoding: (panelId: string) =>
     ipcRenderer.invoke('ssh:get-encoding', panelId),
+  setSSHAutoTrack: (panelId: string, enabled: boolean) =>
+    ipcRenderer.invoke('ssh:set-auto-track', { panelId, enabled }),
 
   // App
   getStartupCwd: () => ipcRenderer.invoke('app:startup-cwd'),
@@ -147,6 +149,11 @@ contextBridge.exposeInMainWorld('api', {
     const handler = (_: any, p: any) => cb(p);
     ipcRenderer.on('ssh:error', handler);
     return () => ipcRenderer.removeListener('ssh:error', handler);
+  },
+  onSSHAutoTrack: (cb: (p: any) => void) => {
+    const handler = (_: any, p: any) => cb(p);
+    ipcRenderer.on('ssh:auto-track', handler);
+    return () => ipcRenderer.removeListener('ssh:auto-track', handler);
   },
   onSSHAuthPrompt: (cb: (p: any) => void) => {
     const handler = (_: any, p: any) => cb(p);

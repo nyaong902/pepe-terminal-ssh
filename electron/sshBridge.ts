@@ -14,11 +14,12 @@ interface ClientRecord {
 }
 
 interface BridgeMessage {
-  type: 'data' | 'connected' | 'closed' | 'error' | 'auth-prompt' | 'sftp-progress' | 'sftp-complete' | 'sftp-error';
+  type: 'data' | 'connected' | 'closed' | 'error' | 'auth-prompt' | 'sftp-progress' | 'sftp-complete' | 'sftp-error' | 'auto-track';
   panelId: string;
   data?: string;
   error?: string;
   prompts?: string[];
+  enabled?: boolean;
 }
 
 class SSHBridge extends EventEmitter {
@@ -234,6 +235,7 @@ class SSHBridge extends EventEmitter {
   private _openShellOnConn(panelId: string, session: any, conn: any, cols: number | undefined, rows: number | undefined, primaryConn: any | undefined): void {
     const shellCols = typeof cols === 'number' ? cols : 120;
     const shellRows = typeof rows === 'number' ? rows : 24;
+    this.termCols.set(panelId, shellCols);
 
     conn.shell({ cols: shellCols, rows: shellRows, term: 'xterm-256color' }, (err: any, stream: any) => {
       if (err) {
@@ -258,13 +260,8 @@ class SSHBridge extends EventEmitter {
             ? data.toString('utf8')
             : iconv.decode(data, cur);
 
-          const shellDetectRe = /\x1b\]9;pepe-shell:([^\x1b\x07]*)(?:\x1b\\|\x07)/;
-          const m = str.match(shellDetectRe);
-          if (m) {
-            const shellPath = m[1].trim();
-            str = str.replace(shellDetectRe, '');
-            this._installOsc7Hook(panelId, shellPath);
-          }
+          // 자동추적 명령 echo 차단 (지금은 거의 안 쓰이지만 안전 장치로 유지)
+          str = this._consumeEchoPrefix(panelId, str);
 
           this.emit('message', { type: 'data', panelId, data: str });
 
@@ -297,15 +294,11 @@ class SSHBridge extends EventEmitter {
 
       this.clients.set(panelId, { conn, stream, encoding: initialEncoding, primaryConn });
 
-      // 세션 옵션 autoTrackPwd 가 켜져 있으면 OSC 9/7 hook 주입 — 터미널에서 cd 하면 파일 트리 자동 추적.
-      // 옵션 꺼져 있으면(기본) 주입하지 않아 화면에 명령 노출 없음, MOTD 완전 보존.
+      // 세션 옵션 autoTrackPwd 가 켜져 있으면 백그라운드 PID 탐지 + cwd 폴링 시작 — 셸에 명령 안 보냄.
       if (session.autoTrackPwd) {
         const injectDelay = session.loginScript && session.loginScript.length > 0 ? 3500 : 800;
         setTimeout(() => {
-          try {
-            const detect = ` printf '\\033]9;pepe-shell:%s\\033\\134\\033[1A\\033[2K\\r' "$SHELL"\n`;
-            stream.write(detect);
-          } catch {}
+          this._installOsc7Hook(panelId, '');
         }, injectDelay);
       }
     });
@@ -363,30 +356,179 @@ class SSHBridge extends EventEmitter {
     return rec?.encoding || null;
   }
 
-  // 셸 검출 결과로 적절한 OSC 7 hook 주입. 매 프롬프트마다 원격 쉘이 현재 디렉토리를
-  // OSC 7 (file://host/path) 시퀀스로 보내게 함.
+  // 검출된 shell path 캐시 (런타임 토글 시 hook 재설치/제거용)
+  private detectedShells: Map<string, string> = new Map();
+  // 마지막 알려진 터미널 cols (wrap 계산용)
+  private termCols: Map<string, number> = new Map();
+  // panel → 인터랙티브 셸 PID (백그라운드 cwd 폴링용)
+  private shellPids: Map<string, number> = new Map();
+  // panel → 마지막으로 알려진 cwd (변경 감지용)
+  private lastCwd: Map<string, string> = new Map();
+  // panel → 폴링 timer
+  private cwdPollers: Map<string, ReturnType<typeof setInterval>> = new Map();
+
+  // 호환성용 no-op: 백그라운드 폴링 방식으로 전환 후 사용 안 함.
+  private _consumeEchoPrefix(_panelId: string, str: string): string {
+    return str;
+  }
+
+  // 셸 PID 를 백그라운드로 탐지하고 cwd 폴링 시작 (셸 stdin 에 명령 안 보냄).
+  // 다중 전략으로 시도. 셸 종류 무관.
   private _installOsc7Hook(panelId: string, shellPath: string) {
     const rec = this.clients.get(panelId);
-    if (!rec) return;
-    const shell = (shellPath || '').toLowerCase();
-    let cmd = '';
-    // 명령 끝에 ; printf '\033[1A\033[2K\r' 로 주입 명령 echo 1줄 erase (MOTD 보존).
-    const clearLine = `; printf '\\033[1A\\033[2K\\r'`;
-    if (shell.includes('zsh')) {
-      cmd = ` precmd_pepe_osc7(){ printf '\\033]7;file://localhost%s\\033\\134' "$PWD" }; typeset -ga precmd_functions; precmd_functions+=(precmd_pepe_osc7)${clearLine}\n`;
-    } else if (shell.includes('tcsh') || shell.includes('csh')) {
-      cmd = ` alias precmd 'printf "\\033]7;file://localhost%s\\033\\134" "$cwd"'${clearLine}\n`;
-    } else if (shell.includes('bash') || shell.endsWith('/sh') || shell === 'sh') {
-      cmd = ` PROMPT_COMMAND='printf "\\033]7;file://localhost%s\\033\\134" "$PWD"'${clearLine}\n`;
+    if (!rec?.conn) return;
+    this.detectedShells.set(panelId, shellPath || '');
+    // SSH_CONNECTION env 로 우리 연결의 셸 후보들을 모두 찾고, 그 중 가장 큰 PID 선택
+    // (= 가장 최근 = 사용자의 foreground 셸. nested shell 케이스도 정확히 추적).
+    // 스크립트는 base64 로 전달해 csh 의 quote/redirect 이슈 우회.
+    const innerScript = `_c="$SSH_CONNECTION"
+candidates=""
+for f in /proc/[0-9]*/environ; do
+  [ -r "$f" ] || continue
+  # SSH_CONNECTION 일치 + TERM env 있음 (interactive PTY) + tty_nr != 0 (controlling TTY 보유)
+  if grep -aqz "SSH_CONNECTION=$_c" "$f" 2>/dev/null && grep -aqz "TERM=" "$f" 2>/dev/null; then
+    p=$(basename $(dirname "$f"))
+    [ -e "/proc/$p/stat" ] || continue
+    tty_nr=$(awk '{print $7}' /proc/$p/stat 2>/dev/null)
+    [ -n "$tty_nr" ] && [ "$tty_nr" != "0" ] || continue
+    n=$(cat /proc/$p/comm 2>/dev/null)
+    case "$n" in
+      csh|tcsh|bash|zsh|sh|ksh|dash|fish)
+        candidates="$candidates $p"
+        ;;
+    esac
+  fi
+done
+# 후보 중 가장 큰 PID 선택 (최신 셸 = foreground)
+best=""
+for p in $candidates; do
+  if [ -z "$best" ] || [ "$p" -gt "$best" ]; then
+    best="$p"
+  fi
+done
+if [ -n "$best" ]; then
+  printf '<<PEPE>>%s<<END>>' "$best"
+  # 디버그: 모든 후보와 cwd 출력
+  for p in $candidates; do
+    cwd=$(readlink /proc/$p/cwd 2>/dev/null)
+    n=$(cat /proc/$p/comm 2>/dev/null)
+    echo "DBG candidate pid=$p comm=$n cwd=$cwd" >&2
+  done
+  exit 0
+fi
+# fallback: ps 기반 etime 정렬
+pid2=$(ps -u "$USER" -o pid,etime,comm 2>/dev/null | awk '$3 ~ /^-?(csh|tcsh|bash|zsh|sh|ksh|dash|fish)$/ {print $1, $2}' | sort -k2 -r | head -1 | awk '{print $1}')
+printf '<<PEPE>>%s<<END>>' "$pid2"`;
+    const b64 = Buffer.from(innerScript).toString('base64');
+    const findPidScript = `echo ${b64} | base64 -d | /bin/sh`;
+    rec.conn.exec(findPidScript, (err: any, stream: any) => {
+      if (err) {
+        console.log(`[autotrack-${panelId.slice(-6)}] PID detect exec failed:`, err);
+        return;
+      }
+      let out = '';
+      let errOut = '';
+      stream.on('data', (d: Buffer) => { out += d.toString('utf8'); });
+      stream.stderr.on('data', (d: Buffer) => { errOut += d.toString('utf8'); });
+      stream.on('close', () => {
+        const m = out.match(/<<PEPE>>([\s\S]*?)<<END>>/);
+        const trimmed = m ? m[1].trim() : out.trim();
+        console.log(`[autotrack-${panelId.slice(-6)}] PID detect output: "${trimmed}" stderr: "${errOut.trim().slice(0, 200)}"`);
+        const pid = parseInt(trimmed, 10);
+        if (pid > 0) {
+          this.shellPids.set(panelId, pid);
+          console.log(`[autotrack-${panelId.slice(-6)}] shell PID=${pid}`);
+          this._startCwdPolling(panelId);
+          this.emit('message', { type: 'auto-track', panelId, enabled: true });
+        } else {
+          console.log(`[autotrack-${panelId.slice(-6)}] PID not found`);
+        }
+      });
+    });
+  }
+
+  // 백그라운드 cwd 폴링 — separate exec 채널로 readlink /proc/PID/cwd 를 주기적으로 실행.
+  // 셸에 일체 명령 보내지 않음. cwd 변경되면 fake OSC 7 emit.
+  private _startCwdPolling(panelId: string): void {
+    this._stopCwdPolling(panelId); // 중복 방지
+    const interval = 400;
+    const pid = this.shellPids.get(panelId);
+    if (!pid) return;
+    const tick = () => {
+      const rec = this.clients.get(panelId);
+      if (!rec?.conn) { this._stopCwdPolling(panelId); return; }
+      const curPid = this.shellPids.get(panelId);
+      if (!curPid) return;
+      // 사용자 로그인 셸(csh) 의 rc 파일이 stdout 에 출력을 추가할 수 있어 — 고유 마커로 readlink 결과만 추출
+      const cmd = `/bin/sh -c 'printf "<<PEPE>>"; readlink /proc/${curPid}/cwd 2>/dev/null; printf "<<END>>"'`;
+      rec.conn.exec(cmd, (err: any, stream: any) => {
+        if (err) {
+          console.log(`[autotrack-${panelId.slice(-6)}] poll exec err:`, err);
+          return;
+        }
+        let out = '';
+        stream.on('data', (d: Buffer) => { out += d.toString('utf8'); });
+        stream.on('close', () => {
+          const m = out.match(/<<PEPE>>([\s\S]*?)<<END>>/);
+          const inner = (m ? m[1] : out).trim();
+          // path 추출 — / 로 시작 (root `/` 단독도 허용)
+          let path = '';
+          if (inner === '/') {
+            path = '/';
+          } else {
+            const pathMatch = inner.match(/\/[A-Za-z0-9_\-./~]+/);
+            if (pathMatch) path = pathMatch[0];
+          }
+          if (!path) {
+            console.log(`[autotrack-${panelId.slice(-6)}] poll: no path in "${inner.slice(0, 100)}"`);
+            return;
+          }
+          const last = this.lastCwd.get(panelId);
+          if (path !== last) {
+            console.log(`[autotrack-${panelId.slice(-6)}] cwd changed: ${last} → ${path}`);
+            this.lastCwd.set(panelId, path);
+            const oscSeq = `\x1b]7;file://localhost${path}\x1b\\`;
+            this.emit('message', { type: 'data', panelId, data: oscSeq });
+          }
+        });
+      });
+    };
+    tick(); // 즉시 한 번
+    const t = setInterval(tick, interval);
+    this.cwdPollers.set(panelId, t);
+  }
+
+  private _stopCwdPolling(panelId: string): void {
+    const t = this.cwdPollers.get(panelId);
+    if (t) { clearInterval(t); this.cwdPollers.delete(panelId); }
+  }
+
+  // 런타임 PWD 자동추적 토글 — 백그라운드 폴링 시작/중지. 셸 stdin 에 명령 절대 안 보냄.
+  // 첫 호출이면 exec 채널로 PID 탐지.
+  setAutoTrack(panelId: string, enabled: boolean): { success: boolean; error?: string } {
+    const rec = this.clients.get(panelId);
+    if (!rec?.conn) return { success: false, error: 'not connected' };
+    if (enabled) {
+      if (this.shellPids.has(panelId)) {
+        // PID 이미 알려짐 — 폴링만 시작
+        this._startCwdPolling(panelId);
+        this.emit('message', { type: 'auto-track', panelId, enabled: true });
+      } else {
+        // PID 미탐지 — exec 채널로 백그라운드 탐지 (셸에 명령 안 보냄)
+        this._installOsc7Hook(panelId, '');
+      }
     } else {
-      return;
+      // 폴링만 중지
+      this._stopCwdPolling(panelId);
+      this.emit('message', { type: 'auto-track', panelId, enabled: false });
     }
-    try { rec.stream.write(cmd); } catch {}
+    return { success: true };
   }
 
   handleResize(panelId: string, cols: number, rows: number) {
     const rec = this.clients.get(panelId);
     if (!rec?.stream) return;
+    if (cols > 0) this.termCols.set(panelId, cols);
     try {
       rec.stream.setWindow(rows, cols, rows, cols);
     } catch {
@@ -409,6 +551,9 @@ class SSHBridge extends EventEmitter {
     }
     this.sftpCache.delete(panelId);
     this.scriptRunners.delete(panelId);
+    this._stopCwdPolling(panelId);
+    this.shellPids.delete(panelId);
+    this.lastCwd.delete(panelId);
   }
 
   // ── SFTP ──
