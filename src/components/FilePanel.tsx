@@ -195,9 +195,29 @@ export const FilePanel: React.FC<Props> = ({ source, sources, onSourceChange, se
             if (s) onSourceChange(s);
           }}
         >
-          {sources.map(s => (
-            <option key={`${s.mode}:${s.termId || s.sessionId || ''}`} value={`${s.mode}:${s.termId || s.sessionId || ''}`}>{s.label}</option>
-          ))}
+          {(() => {
+            const localSources = sources.filter(s => s.mode === 'local');
+            const connected = sources.filter(s => s.mode === 'remote');
+            const lazy = sources.filter(s => s.mode === 'lazy-remote');
+            const renderOpt = (s: PanelSource) => (
+              <option key={`${s.mode}:${s.termId || s.sessionId || ''}`} value={`${s.mode}:${s.termId || s.sessionId || ''}`}>{s.label}</option>
+            );
+            return (
+              <>
+                {localSources.map(renderOpt)}
+                {connected.length > 0 && (
+                  <optgroup label="🟢 연결됨">
+                    {connected.map(renderOpt)}
+                  </optgroup>
+                )}
+                {lazy.length > 0 && (
+                  <optgroup label="⚪ 연결 안됨">
+                    {lazy.map(renderOpt)}
+                  </optgroup>
+                )}
+              </>
+            );
+          })()}
         </select>
       </div>
       <div className="fe-path-bar">

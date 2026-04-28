@@ -757,8 +757,14 @@ html, body {
   flex-shrink: 0;
   background: #0d0f10;
   border-right: 1px solid #333;
+  border-top-right-radius: 10px;
+  border-bottom-right-radius: 10px;
   z-index: 1;
   margin-top: 40px;
+  margin-bottom: 24px;
+  overflow: hidden;
+  align-self: flex-start;
+  height: auto;
 }
 
 .session-sidebar-trigger-top {
@@ -780,7 +786,7 @@ html, body {
 }
 
 .session-sidebar-trigger-bottom {
-  flex: 1;
+  flex: 0;
 }
 
 .session-sidebar-trigger-text {
@@ -3023,9 +3029,15 @@ html, body {
   flex-shrink: 0;
   background: #0d0f10;
   border-right: 1px solid #333;
+  border-top-right-radius: 10px;
+  border-bottom-right-radius: 10px;
   display: flex;
   flex-direction: column;
   margin-top: 40px;
+  margin-bottom: 24px;
+  overflow: hidden;
+  align-self: flex-start;
+  height: auto;
 }
 /* 세션 사이드바가 unpinned (auto-hide) 일 때 — 세션 트리거 아래에 fixed 로 스택. 간격 없음. */
 .app-root:has(.session-sidebar-inner.auto-hide) .workspace-file-tree-trigger {
@@ -3052,7 +3064,7 @@ html, body {
 .workspace-file-tree-trigger-top:hover .workspace-file-tree-trigger-text {
   color: #ccc;
 }
-.workspace-file-tree-trigger-bottom { flex: 1; }
+.workspace-file-tree-trigger-bottom { flex: 0; }
 .workspace-file-tree-trigger-text {
   color: #888;
   font-size: 11px;
@@ -3492,22 +3504,23 @@ html, body {
 /* 오른쪽 세로 트리거 (auto-hide 모드일 때만) */
 .claude-chat-sidebar-trigger {
   position: fixed;
-  top: 40px;
-  bottom: 24px;
+  bottom: 28px;
   right: 0;
   width: 20px;
   background: #0d0f10;
   border-left: 1px solid #333;
+  border-top-left-radius: 10px;
+  border-bottom-left-radius: 10px;
   z-index: 1340;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end; /* trigger-top 을 일괄 전송바 바로 위로 */
   pointer-events: none;
+  overflow: hidden;
 }
 .claude-chat-sidebar-trigger > * { pointer-events: auto; }
-/* 일괄 전송바 있으면 트리거 하단을 그 위까지만 (status 24 + broadcast 36) */
+/* 일괄 전송바 있으면 트리거 하단을 그 위까지만 (status 24 + broadcast 36 + 4 여유) */
 .app-root.has-broadcast .claude-chat-sidebar-trigger {
-  bottom: 60px;
+  bottom: 64px;
 }
 /* 하단쪽 정렬 — 일괄전송바 바로 위 아이콘 버튼 */
 .claude-chat-sidebar-trigger-top {

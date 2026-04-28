@@ -1902,10 +1902,20 @@ function App() {
               e.preventDefault();
               e.stopPropagation();
               const api = (window as any).api;
-              api?.windowStartDrag?.(e.screenX, e.screenY);
-              const onMove = (ev: MouseEvent) => { ev.preventDefault(); api?.windowDragMove?.(ev.screenX, ev.screenY); };
+              const startX = e.screenX, startY = e.screenY;
+              let dragStarted = false;
+              const THRESHOLD = 5; // 픽셀 — 이 이상 움직여야 실제 드래그로 처리 (단순 클릭은 창 복원 안되도록)
+              const onMove = (ev: MouseEvent) => {
+                if (!dragStarted) {
+                  if (Math.abs(ev.screenX - startX) < THRESHOLD && Math.abs(ev.screenY - startY) < THRESHOLD) return;
+                  dragStarted = true;
+                  api?.windowStartDrag?.(startX, startY);
+                }
+                ev.preventDefault();
+                api?.windowDragMove?.(ev.screenX, ev.screenY);
+              };
               const onUp = () => {
-                api?.windowEndDrag?.();
+                if (dragStarted) api?.windowEndDrag?.();
                 window.removeEventListener('mousemove', onMove);
                 window.removeEventListener('mouseup', onUp);
               };
@@ -2687,11 +2697,23 @@ function App() {
                 const parent = folderPath(f.parentId);
                 return parent ? `${parent}/${f.name}` : f.name;
               };
-              const sorted = [...remotePickerSessions].sort((a, b) => {
+              // 연결된 세션이 위로 — 같은 그룹 내에서는 폴더 경로 + 이름으로 정렬
+              const sortFn = (a: typeof remotePickerSessions[number], b: typeof remotePickerSessions[number]) => {
                 const fa = folderPath(a.folderId);
                 const fb = folderPath(b.folderId);
                 return fa.localeCompare(fb) || a.name.localeCompare(b.name);
-              });
+              };
+              const connected = remotePickerSessions.filter(s => connectedSet.has(s.id)).sort(sortFn);
+              const disconnected = remotePickerSessions.filter(s => !connectedSet.has(s.id)).sort(sortFn);
+              const renderOption = (s: typeof remotePickerSessions[number]) => {
+                const fp = folderPath(s.folderId);
+                const mark = connectedSet.has(s.id) ? '🟢' : '⚪';
+                return (
+                  <option key={s.id} value={s.id}>
+                    {mark} {s.name}{fp ? ` [${fp}]` : ''} ({s.host})
+                  </option>
+                );
+              };
               return (
                 <select value={remotePickerSessionId} onChange={e => {
                   setRemotePickerSessionId(e.target.value);
@@ -2699,15 +2721,16 @@ function App() {
                   setRemotePickerSelected(new Set());
                 }}>
                   <option value="">(세션 선택)</option>
-                  {sorted.map(s => {
-                    const fp = folderPath(s.folderId);
-                    const mark = connectedSet.has(s.id) ? '🟢' : '⚪';
-                    return (
-                      <option key={s.id} value={s.id}>
-                        {mark} {s.name}{fp ? ` [${fp}]` : ''} ({s.host})
-                      </option>
-                    );
-                  })}
+                  {connected.length > 0 && (
+                    <optgroup label="🟢 연결됨">
+                      {connected.map(renderOption)}
+                    </optgroup>
+                  )}
+                  {disconnected.length > 0 && (
+                    <optgroup label="⚪ 연결 안됨">
+                      {disconnected.map(renderOption)}
+                    </optgroup>
+                  )}
                 </select>
               );
             })()}
