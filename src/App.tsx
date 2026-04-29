@@ -1649,7 +1649,7 @@ function App() {
           let sessPath = '';
           try { sessPath = await (window as any).api.getSessionsPath(); } catch {}
           setInfoModal({ title: 'ℹ PePe Terminal(SSH) 정보', text: (
-          'PePe Terminal(SSH) v2.0.6\n\n' +
+          'PePe Terminal(SSH) v2.0.7\n\n' +
           '만든이: Claude (feat. ghjeong[prompt])\n\n' +
           '── 터미널 기본 ──\n' +
           'SSH/SFTP 원격 접속 (비밀번호/키/Expect-Send 로그인)\n' +
